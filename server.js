@@ -97,7 +97,18 @@ const upload = multer({
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: process.env.NODE_ENV === 'production' ? 100 : 1000,
-  message: 'Too many requests from this IP, please try again after 15 minutes'
+  message: JSON.stringify({ 
+    error: 'Too many requests',
+    details: 'Please try again after 15 minutes'
+  }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'Too many requests',
+      details: 'Please try again after 15 minutes'
+    });
+  }
 });
 app.use('/api/', apiLimiter);
 
