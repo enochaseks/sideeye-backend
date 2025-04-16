@@ -25,7 +25,7 @@ if (process.env.NODE_ENV === 'production') {
   
   // Production CORS configuration
   const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'https://sideeye.uk',
+    origin: [process.env.FRONTEND_URL || 'https://sideeye.uk', 'https://api.sideeye.uk'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
     exposedHeaders: ['Content-Length', 'Content-Type'],
@@ -143,83 +143,103 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Create stream endpoint
+// Add stream status endpoint
+app.get('/api/streams/:roomId/status', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const db = admin.firestore();
+    const roomRef = db.collection('sideRooms').doc(roomId);
+    const roomDoc = await roomRef.get();
+
+    if (!roomDoc.exists) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const roomData = roomDoc.data();
+    if (!roomData.streamId) {
+      return res.status(404).json({ error: 'No stream found for this room' });
+    }
+
+    // Get stream status from Mux
+    const stream = await Video.LiveStreams.get(roomData.streamId);
+    
+    res.json({
+      streamId: stream.id,
+      status: stream.status,
+      playbackId: stream.playback_ids?.[0]?.id,
+      streamKey: stream.stream_key
+    });
+  } catch (error) {
+    console.error('Error checking stream status:', error);
+    res.status(500).json({ error: 'Failed to check stream status' });
+  }
+});
+
+// Update create stream endpoint to handle existing streams
 app.post('/api/create-stream', async (req, res) => {
   try {
-    console.log('Received stream creation request:', req.body);
-    
     const { roomId } = req.body;
     if (!roomId) {
-      return res.status(400).json({ 
-        error: 'Room ID is required',
-        details: 'Please provide a valid room ID'
-      });
+      return res.status(400).json({ error: 'Room ID is required' });
     }
 
-    if (!Video) {
-      console.error('Mux Video client not initialized');
-      return res.status(500).json({ 
-        error: 'Stream service not configured',
-        details: 'Mux client initialization failed'
-      });
+    const db = admin.firestore();
+    const roomRef = db.collection('sideRooms').doc(roomId);
+    const roomDoc = await roomRef.get();
+
+    if (!roomDoc.exists) {
+      return res.status(404).json({ error: 'Room not found' });
     }
 
-    try {
-      const stream = await Video.LiveStreams.create({
-        playback_policy: ['public'],
-        new_asset_settings: {
-          playback_policy: ['public']
+    const roomData = roomDoc.data();
+    
+    // Check if there's an existing active stream
+    if (roomData.streamId) {
+      try {
+        const existingStream = await Video.LiveStreams.get(roomData.streamId);
+        if (existingStream.status === 'active') {
+          return res.json({
+            streamId: existingStream.id,
+            streamKey: existingStream.stream_key,
+            playbackId: existingStream.playback_ids?.[0]?.id,
+            status: existingStream.status
+          });
         }
-      });
-
-      if (!stream || !stream.id || !stream.playback_ids?.[0]?.id) {
-        throw new Error('Invalid stream response from Mux');
+      } catch (error) {
+        console.log('Existing stream not found or inactive, creating new one');
       }
-
-      // Store the stream ID in Firestore
-      const db = admin.firestore();
-      await db.collection('sideRooms').doc(roomId).set({
-        streamId: stream.id,
-        streamKey: stream.stream_key,
-        playbackId: stream.playback_ids[0].id,
-        status: 'active',
-        updatedAt: new Date()
-      }, { merge: true });
-
-      // Send both streamId and streamKey in the response
-      res.json({
-        streamId: stream.id,
-        streamKey: stream.stream_key,
-        playbackId: stream.playback_ids[0].id,
-        status: stream.status
-      });
-    } catch (muxError) {
-      console.error('Mux API Error:', {
-        message: muxError.message,
-        type: muxError.type,
-        status: muxError.status,
-        code: muxError.code,
-        details: muxError.details
-      });
-      
-      if (muxError.type === 'unauthorized') {
-        return res.status(401).json({ 
-          error: 'Mux authentication failed',
-          details: 'Please check your Mux API credentials'
-        });
-      }
-      
-      res.status(500).json({ 
-        error: 'Failed to create stream',
-        details: muxError.message || 'Unknown Mux API error'
-      });
     }
+
+    // Create new stream
+    const stream = await Video.LiveStreams.create({
+      playback_policy: ['public'],
+      new_asset_settings: {
+        playback_policy: ['public']
+      }
+    });
+
+    if (!stream || !stream.id || !stream.playback_ids?.[0]?.id) {
+      throw new Error('Invalid stream response from Mux');
+    }
+
+    // Update room with new stream info
+    await roomRef.update({
+      streamId: stream.id,
+      streamKey: stream.stream_key,
+      playbackId: stream.playback_ids[0].id,
+      status: 'active',
+      updatedAt: new Date()
+    });
+
+    res.json({
+      streamId: stream.id,
+      streamKey: stream.stream_key,
+      playbackId: stream.playback_ids[0].id,
+      status: stream.status
+    });
   } catch (error) {
     console.error('Error creating stream:', error);
-    res.status(500).json({ 
-      error: 'Internal server error',
-      details: error.message || 'Unknown error occurred'
-    });
+    res.status(500).json({ error: 'Failed to create stream' });
   }
 });
 
