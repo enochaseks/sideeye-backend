@@ -15,8 +15,11 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Log CORS origin for debugging
-console.log('CORS configured for origin:', process.env.FRONTEND_URL);
+// Log server configuration for debugging
+console.log('Server Configuration:');
+console.log('- Environment:', process.env.NODE_ENV);
+console.log('- Port:', PORT);
+console.log('- CORS Origin:', process.env.FRONTEND_URL);
 
 // CORS should be one of the first middlewares
 app.use(cors({
