@@ -13,56 +13,36 @@ const Mux = require('@mux/mux-node');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
 
-// CORS configuration
-const corsOptions = {
-  origin: ['https://sideeye.uk', 'https://www.sideeye.uk', 'http://localhost:3000'],
+// Enable pre-flight requests for all routes
+app.options('*', cors());
+
+// Basic CORS setup - must be before any route definitions
+app.use(cors({
+  origin: true, // This allows all origins, but checks against the actual origin
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
-};
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true
+}));
 
-// Apply CORS middleware before any other middleware
-app.use(cors(corsOptions));
+// Trust proxy - important for Railway deployment
+app.set('trust proxy', 1);
 
-// Handle preflight requests
-app.options('*', cors(corsOptions));
-
-// Production security configurations
-if (process.env.NODE_ENV === 'production') {
-  // Trust proxy if behind reverse proxy
-  app.set('trust proxy', 1);
-  
-  // Security headers with correct CORS settings
-  app.use(helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    crossOriginOpenerPolicy: { policy: "same-origin" },
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        connectSrc: ["'self'", "https://sideeye.uk", "https://www.sideeye.uk"],
-        imgSrc: ["'self'", "https:", "data:", "blob:"],
-        mediaSrc: ["'self'", "https:", "data:", "blob:"],
-        upgradeInsecureRequests: null
-      }
-    }
-  }));
-}
+// Basic security headers
+app.use(helmet({
+  crossOriginResourcePolicy: false, // Allow cross-origin resource sharing
+  crossOriginOpenerPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
 
 // Compression middleware
 app.use(compression());
 
 // Request logging
-if (process.env.NODE_ENV === 'production') {
-  app.use(morgan('combined'));
-} else {
-  app.use(morgan('dev'));
-}
+app.use(morgan('combined'));
 
-// Body parser middleware with limits
+// Body parser middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -74,16 +54,7 @@ const serviceAccount = process.env.NODE_ENV === 'production'
 try {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-    httpAgent: new https.Agent({
-      keepAlive: true,
-      maxSockets: 25,
-      timeout: 30000 // 30 seconds
-    }),
-    retryConfig: {
-      maxRetries: 3,
-      backoffFactor: 1.5
-    }
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
   });
   console.log('Firebase Admin SDK initialized successfully');
 } catch (error) {
@@ -368,7 +339,7 @@ app.use((req, res) => {
 });
 
 // Start server
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
 });
 
