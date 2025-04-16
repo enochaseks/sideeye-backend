@@ -56,8 +56,8 @@ app.get('/api/cors-test', (req, res) => {
 });
 
 // Initialize Firebase Admin
-const serviceAccount = process.env.NODE_ENV === 'production' 
-  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+const serviceAccount = process.env.NODE_ENV === 'production'
+  ? JSON.parse(process.env.SERVICE_ACCOUNT_KEY)
   : require('./serviceAccountKey.json');
 
 try {
@@ -138,6 +138,27 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
+// Service account test endpoint
+app.get('/api/test-service-account', (req, res) => {
+  try {
+    const serviceAccount = process.env.NODE_ENV === 'production'
+      ? JSON.parse(process.env.SERVICE_ACCOUNT_KEY)
+      : require('./serviceAccountKey.json');
+    
+    res.json({
+      status: 'success',
+      environment: process.env.NODE_ENV,
+      hasServiceAccount: !!serviceAccount,
+      projectId: serviceAccount.project_id
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      error: error.message
+    });
+  }
+});
+
 // API Routes
 app.use('/api', (req, res, next) => {
   console.log(`API Request: ${req.method} ${req.path}`);
@@ -173,6 +194,102 @@ app.get('/api/streams/:roomId/status', async (req, res) => {
   } catch (error) {
     console.error('Error checking stream status:', error);
     res.status(500).json({ error: 'Failed to check stream status' });
+  }
+});
+
+// Mobile streaming endpoint
+app.post('/api/mux/create-stream', async (req, res) => {
+  try {
+    const { roomId, userId } = req.body;
+    if (!roomId || !userId) {
+      return res.status(400).json({ error: 'Room ID and User ID are required' });
+    }
+
+    console.log('Creating mobile stream for room:', roomId, 'user:', userId);
+
+    // Create new stream
+    const stream = await Video.LiveStreams.create({
+      playback_policy: ['public'],
+      new_asset_settings: { playback_policy: ['public'] }
+    });
+
+    if (!stream || !stream.id || !stream.playback_ids?.[0]?.id) {
+      throw new Error('Invalid stream response from Mux');
+    }
+
+    // Get Firestore reference
+    const db = admin.firestore();
+    const roomRef = db.collection('sideRooms').doc(roomId);
+
+    // Update room with mobile stream info
+    await roomRef.update({
+      mobileStreamId: stream.id,
+      mobileStreamKey: stream.stream_key,
+      mobilePlaybackId: stream.playback_ids[0].id,
+      mobileStreamerId: userId,
+      isMobileStreaming: true,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({
+      streamId: stream.id,
+      streamKey: stream.stream_key,
+      playbackId: stream.playback_ids[0].id
+    });
+  } catch (error) {
+    console.error('Error creating mobile stream:', error);
+    res.status(500).json({ 
+      error: 'Failed to create mobile stream',
+      details: error.message
+    });
+  }
+});
+
+// Mobile stream deletion endpoint
+app.post('/api/mux/delete-stream', async (req, res) => {
+  try {
+    const { roomId, userId } = req.body;
+    if (!roomId || !userId) {
+      return res.status(400).json({ error: 'Room ID and User ID are required' });
+    }
+
+    const db = admin.firestore();
+    const roomRef = db.collection('sideRooms').doc(roomId);
+    const roomDoc = await roomRef.get();
+
+    if (!roomDoc.exists) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const roomData = roomDoc.data();
+    if (roomData.mobileStreamerId !== userId) {
+      return res.status(403).json({ error: 'Not authorized to delete this stream' });
+    }
+
+    if (roomData.mobileStreamId) {
+      try {
+        await Video.LiveStreams.delete(roomData.mobileStreamId);
+      } catch (error) {
+        console.log('Error deleting Mux stream:', error);
+      }
+    }
+
+    await roomRef.update({
+      mobileStreamId: null,
+      mobileStreamKey: null,
+      mobilePlaybackId: null,
+      mobileStreamerId: null,
+      isMobileStreaming: false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ message: 'Stream deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting mobile stream:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete mobile stream',
+      details: error.message
+    });
   }
 });
 
