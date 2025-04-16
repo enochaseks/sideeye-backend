@@ -15,34 +15,42 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Log CORS origin for debugging
+console.log('CORS configured for origin:', process.env.FRONTEND_URL);
+
+// CORS should be one of the first middlewares
+app.use(cors({
+  origin: process.env.FRONTEND_URL,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+// Trust proxy - important for Railway deployment
+app.set('trust proxy', 1);
+
 // Basic middleware
 app.use(compression());
 app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Allow requests from sideeye.uk
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', process.env.FRONTEND_URL);
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
-// Basic security with helmet
+// Basic security with helmet - after CORS
 app.use(helmet({
   crossOriginResourcePolicy: false,
   crossOriginOpenerPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
-// Trust proxy - important for Railway deployment
-app.set('trust proxy', 1);
+// Add CORS test endpoint
+app.get('/api/cors-test', (req, res) => {
+  res.json({ 
+    message: 'CORS test successful',
+    origin: req.get('Origin'),
+    environment: process.env.NODE_ENV,
+    allowedOrigin: process.env.FRONTEND_URL
+  });
+});
 
 // Initialize Firebase Admin
 const serviceAccount = process.env.NODE_ENV === 'production' 
