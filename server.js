@@ -60,11 +60,21 @@ app.get('/api/cors-test', (req, res) => {
 });
 
 // Initialize Firebase Admin
-const serviceAccount = process.env.NODE_ENV === 'production'
-  ? JSON.parse(process.env.SERVICE_ACCOUNT_KEY)
-  : require('./serviceAccountKey.json');
-
+let serviceAccount;
 try {
+  if (process.env.NODE_ENV === 'production') {
+    if (!process.env.SERVICE_ACCOUNT_KEY) {
+      throw new Error('SERVICE_ACCOUNT_KEY environment variable is not set');
+    }
+    serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+  } else {
+    serviceAccount = require('./serviceAccountKey.json');
+  }
+
+  if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
+    throw new Error('Invalid service account configuration');
+  }
+
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET
