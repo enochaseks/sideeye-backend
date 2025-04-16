@@ -15,36 +15,33 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Enable pre-flight requests for all routes
-app.options('*', cors());
+// Basic middleware
+app.use(compression());
+app.use(morgan('combined'));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Basic CORS setup - must be before any route definitions
+// CORS configuration - must be before any route handlers
 app.use(cors({
-  origin: true, // This allows all origins, but checks against the actual origin
+  origin: ['https://sideeye.uk', 'http://localhost:3000'],
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  credentials: true
+  maxAge: 86400 // 24 hours
 }));
 
-// Trust proxy - important for Railway deployment
-app.set('trust proxy', 1);
+// Handle preflight requests
+app.options('*', cors());
 
-// Basic security headers
+// Basic security with helmet
 app.use(helmet({
-  crossOriginResourcePolicy: false, // Allow cross-origin resource sharing
+  crossOriginResourcePolicy: false,
   crossOriginOpenerPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
-// Compression middleware
-app.use(compression());
-
-// Request logging
-app.use(morgan('combined'));
-
-// Body parser middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Trust proxy - important for Railway deployment
+app.set('trust proxy', 1);
 
 // Initialize Firebase Admin
 const serviceAccount = process.env.NODE_ENV === 'production' 
@@ -175,63 +172,83 @@ app.post('/api/create-stream', async (req, res) => {
       return res.status(400).json({ error: 'Room ID is required' });
     }
 
+    console.log('Creating stream for room:', roomId);
+
     const db = admin.firestore();
     const roomRef = db.collection('sideRooms').doc(roomId);
-    const roomDoc = await roomRef.get();
 
-    if (!roomDoc.exists) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
+    // Use a transaction to ensure atomic updates
+    const result = await db.runTransaction(async (transaction) => {
+      const roomDoc = await transaction.get(roomRef);
+      
+      if (!roomDoc.exists) {
+        throw new Error('Room not found');
+      }
 
-    const roomData = roomDoc.data();
-    
-    // Check if there's an existing active stream
-    if (roomData.streamId) {
-      try {
-        const existingStream = await Video.LiveStreams.get(roomData.streamId);
-        if (existingStream.status === 'active') {
-          return res.json({
-            streamId: existingStream.id,
-            streamKey: existingStream.stream_key,
-            playbackId: existingStream.playback_ids?.[0]?.id,
-            status: existingStream.status
-          });
+      const roomData = roomDoc.data();
+
+      // Check if there's an existing active stream
+      if (roomData.streamId) {
+        try {
+          const existingStream = await Video.LiveStreams.get(roomData.streamId);
+          if (existingStream.status === 'active') {
+            return {
+              streamId: existingStream.id,
+              streamKey: existingStream.stream_key,
+              playbackId: existingStream.playback_ids[0].id,
+              status: existingStream.status
+            };
+          }
+        } catch (error) {
+          console.log('Existing stream not found or inactive, creating new one');
         }
-      } catch (error) {
-        console.log('Existing stream not found or inactive, creating new one');
       }
-    }
 
-    // Create new stream
-    const stream = await Video.LiveStreams.create({
-      playback_policy: ['public'],
-      new_asset_settings: {
-        playback_policy: ['public']
+      // Create new stream
+      const stream = await Video.LiveStreams.create({
+        playback_policy: ['public'],
+        new_asset_settings: { playback_policy: ['public'] }
+      });
+
+      if (!stream || !stream.id || !stream.playback_ids?.[0]?.id) {
+        throw new Error('Invalid stream response from Mux');
       }
+
+      // Prepare the update data
+      const updateData = {
+        streamId: stream.id,
+        streamKey: stream.stream_key,
+        playbackId: stream.playback_ids[0].id,
+        status: 'active',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastActive: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      // If activeUsers field doesn't exist, initialize it
+      if (typeof roomData.activeUsers === 'undefined') {
+        updateData.activeUsers = 1;
+      } else {
+        updateData.activeUsers = admin.firestore.FieldValue.increment(1);
+      }
+
+      // Update the room document
+      transaction.update(roomRef, updateData);
+
+      return {
+        streamId: stream.id,
+        streamKey: stream.stream_key,
+        playbackId: stream.playback_ids[0].id,
+        status: stream.status
+      };
     });
 
-    if (!stream || !stream.id || !stream.playback_ids?.[0]?.id) {
-      throw new Error('Invalid stream response from Mux');
-    }
-
-    // Update room with new stream info
-    await roomRef.update({
-      streamId: stream.id,
-      streamKey: stream.stream_key,
-      playbackId: stream.playback_ids[0].id,
-      status: 'active',
-      updatedAt: new Date()
-    });
-
-    res.json({
-      streamId: stream.id,
-      streamKey: stream.stream_key,
-      playbackId: stream.playback_ids[0].id,
-      status: stream.status
-    });
+    res.json(result);
   } catch (error) {
     console.error('Error creating stream:', error);
-    res.status(500).json({ error: 'Failed to create stream' });
+    res.status(500).json({ 
+      error: 'Failed to create stream',
+      details: error.message
+    });
   }
 });
 
