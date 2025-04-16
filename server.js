@@ -96,10 +96,38 @@ try {
 }
 
 // Initialize Mux
-const { Video } = new Mux(
-  process.env.MUX_TOKEN_ID,
-  process.env.MUX_TOKEN_SECRET
-);
+let muxClient;
+try {
+  if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) {
+    console.error('Mux credentials missing:', {
+      hasTokenId: !!process.env.MUX_TOKEN_ID,
+      hasTokenSecret: !!process.env.MUX_TOKEN_SECRET
+    });
+    throw new Error('Mux credentials are not configured');
+  }
+  
+  muxClient = new Mux(process.env.MUX_TOKEN_ID, process.env.MUX_TOKEN_SECRET);
+  console.log('Mux client initialized successfully');
+  
+  // Test Mux connection
+  const testStream = await muxClient.Video.LiveStreams.create({
+    playback_policy: ['public'],
+    new_asset_settings: { playback_policy: ['public'] }
+  });
+  console.log('Mux test stream created successfully:', testStream);
+  
+  // Clean up test stream
+  await muxClient.Video.LiveStreams.del(testStream.id);
+  console.log('Mux test stream deleted successfully');
+} catch (error) {
+  console.error('Error initializing Mux client:', error);
+  console.error('Error details:', {
+    message: error.message,
+    stack: error.stack,
+    code: error.code
+  });
+  process.exit(1);
+}
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -228,11 +256,22 @@ app.post('/api/create-stream', async (req, res) => {
     const { roomId, userId } = req.body;
 
     if (!roomId || !userId) {
-      console.error('Missing required parameters');
+      console.error('Missing required parameters:', { roomId, userId });
       return res.status(400).json({ error: 'Missing roomId or userId' });
     }
 
-    const stream = await Mux.Video.LiveStreams.create({
+    if (!muxClient || !muxClient.Video) {
+      console.error('Mux client not initialized:', { hasClient: !!muxClient, hasVideo: !!muxClient?.Video });
+      throw new Error('Mux client not properly initialized');
+    }
+
+    console.log('Creating Mux stream with client:', {
+      hasClient: !!muxClient,
+      hasVideo: !!muxClient.Video,
+      hasLiveStreams: !!muxClient.Video.LiveStreams
+    });
+
+    const stream = await muxClient.Video.LiveStreams.create({
       playback_policy: ['public'],
       new_asset_settings: { playback_policy: ['public'] }
     });
@@ -241,6 +280,11 @@ app.post('/api/create-stream', async (req, res) => {
     res.json(stream);
   } catch (error) {
     console.error('Error creating stream:', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code
+    });
     res.status(500).json({ error: error.message });
   }
 });
@@ -256,7 +300,11 @@ app.post('/api/delete-stream', async (req, res) => {
       return res.status(400).json({ error: 'Missing streamId' });
     }
 
-    await Mux.Video.LiveStreams.del(streamId);
+    if (!muxClient || !muxClient.Video) {
+      throw new Error('Mux client not properly initialized');
+    }
+
+    await muxClient.Video.LiveStreams.del(streamId);
     console.log('Stream deleted successfully:', streamId);
     res.json({ message: 'Stream deleted successfully' });
   } catch (error) {
