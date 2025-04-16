@@ -15,31 +15,41 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// CORS configuration
+const corsOptions = {
+  origin: ['https://sideeye.uk', 'https://www.sideeye.uk', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
+
+// Apply CORS middleware before any other middleware
+app.use(cors(corsOptions));
+
+// Handle preflight requests
+app.options('*', cors(corsOptions));
+
 // Production security configurations
 if (process.env.NODE_ENV === 'production') {
   // Trust proxy if behind reverse proxy
   app.set('trust proxy', 1);
   
-  // Security headers
-  app.use(helmet());
-  
-  // Production CORS configuration
-  const corsOptions = {
-    origin: [process.env.FRONTEND_URL || 'https://sideeye.uk', 'https://api.sideeye.uk'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
-    exposedHeaders: ['Content-Length', 'Content-Type'],
-    credentials: true,
-    maxAge: 86400 // 24 hours
-  };
-
-  // Apply CORS middleware before other middleware
-  app.use(cors(corsOptions));
-
-  // Add OPTIONS handler for preflight requests
-  app.options('*', cors(corsOptions));
-} else {
-  app.use(cors());
+  // Security headers with correct CORS settings
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginOpenerPolicy: { policy: "same-origin" },
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", "https://sideeye.uk", "https://www.sideeye.uk"],
+        imgSrc: ["'self'", "https:", "data:", "blob:"],
+        mediaSrc: ["'self'", "https:", "data:", "blob:"],
+        upgradeInsecureRequests: null
+      }
+    }
+  }));
 }
 
 // Compression middleware
@@ -61,19 +71,25 @@ const serviceAccount = process.env.NODE_ENV === 'production'
   ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
   : require('./serviceAccountKey.json');
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-  httpAgent: new https.Agent({
-    keepAlive: true,
-    maxSockets: 25,
-    timeout: 30000 // 30 seconds
-  }),
-  retryConfig: {
-    maxRetries: 3,
-    backoffFactor: 1.5
-  }
-});
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    httpAgent: new https.Agent({
+      keepAlive: true,
+      maxSockets: 25,
+      timeout: 30000 // 30 seconds
+    }),
+    retryConfig: {
+      maxRetries: 3,
+      backoffFactor: 1.5
+    }
+  });
+  console.log('Firebase Admin SDK initialized successfully');
+} catch (error) {
+  console.error('Error initializing Firebase Admin SDK:', error);
+  process.exit(1);
+}
 
 // Initialize Mux
 const { Video } = new Mux(
