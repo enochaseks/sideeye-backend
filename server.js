@@ -106,11 +106,17 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
+// Create stream endpoint
 app.post('/api/create-stream', async (req, res) => {
   try {
+    console.log('Received stream creation request:', req.body);
+    
     const { roomId } = req.body;
     if (!roomId) {
-      return res.status(400).json({ error: 'Room ID is required' });
+      return res.status(400).json({ 
+        error: 'Room ID is required',
+        details: 'Please provide a valid room ID'
+      });
     }
 
     const muxTokenId = process.env.MUX_TOKEN_ID;
@@ -144,8 +150,8 @@ app.post('/api/create-stream', async (req, res) => {
       }
 
       // Store the stream ID in Firestore
-      const db = getFirestore();
-      await setDoc(doc(db, 'sideRooms', roomId), {
+      const db = admin.firestore();
+      await db.collection('sideRooms').doc(roomId).set({
         streamId: stream.id,
         streamKey: stream.stream_key,
         playbackId: stream.playback_ids[0].id,
