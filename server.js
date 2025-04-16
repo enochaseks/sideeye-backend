@@ -25,7 +25,7 @@ if (process.env.NODE_ENV === 'production') {
   
   // Production CORS configuration
   const corsOptions = {
-    origin: process.env.FRONTEND_URL || 'https://your-production-domain.com',
+    origin: process.env.FRONTEND_URL || 'https://sideeye.uk',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
