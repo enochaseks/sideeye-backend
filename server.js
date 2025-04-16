@@ -21,17 +21,27 @@ console.log('- Environment:', process.env.NODE_ENV);
 console.log('- Port:', PORT);
 console.log('- CORS Origin:', process.env.FRONTEND_URL);
 
-// Configure CORS
-const corsOptions = {
-  origin: [process.env.FRONTEND_URL, 'https://sideeye.uk'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'Accept', 'X-Requested-With'],
-  credentials: true,
-  maxAge: 86400 // 24 hours
-};
+// CORS middleware with detailed logging
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  console.log(`Incoming request: ${req.method} ${req.path}`);
+  console.log(`Origin: ${origin}`);
+  console.log(`Headers:`, req.headers);
 
-// CORS should be one of the first middlewares
-app.use(cors(corsOptions));
+  // Allow requests from any origin in production
+  res.header('Access-Control-Allow-Origin', origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    console.log('Handling OPTIONS preflight request');
+    return res.status(200).json({ message: 'CORS enabled' });
+  }
+
+  next();
+});
 
 // Trust proxy - important for Railway deployment
 app.set('trust proxy', 1);
@@ -55,7 +65,7 @@ app.get('/api/cors-test', (req, res) => {
     message: 'CORS test successful',
     origin: req.get('Origin'),
     environment: process.env.NODE_ENV,
-    allowedOrigin: process.env.FRONTEND_URL
+    headers: req.headers
   });
 });
 
@@ -205,119 +215,53 @@ app.get('/api/streams/:roomId/status', async (req, res) => {
   }
 });
 
-// Test endpoint for streaming
+// Test endpoint for CORS
 app.get('/api/test', (req, res) => {
-  res.json({
-    status: 'ok',
-    cors: 'enabled',
-    origin: req.get('Origin'),
-    allowedOrigins: corsOptions.origin
-  });
+  console.log('Test endpoint called');
+  res.json({ message: 'CORS is working!' });
 });
 
-// Unified streaming endpoint for both mobile and desktop
+// Enhanced error handling for stream creation
 app.post('/api/create-stream', async (req, res) => {
   try {
-    const { roomId, userId, deviceType } = req.body;
+    console.log('Create stream request received:', req.body);
+    const { roomId, userId } = req.body;
+
     if (!roomId || !userId) {
-      return res.status(400).json({ error: 'Room ID and User ID are required' });
+      console.error('Missing required parameters');
+      return res.status(400).json({ error: 'Missing roomId or userId' });
     }
 
-    console.log(`Creating stream for room: ${roomId}, user: ${userId}, device: ${deviceType || 'desktop'}`);
-
-    // Create new stream
-    const stream = await Video.LiveStreams.create({
+    const stream = await Mux.Video.LiveStreams.create({
       playback_policy: ['public'],
       new_asset_settings: { playback_policy: ['public'] }
     });
 
-    if (!stream || !stream.id || !stream.playback_ids?.[0]?.id) {
-      throw new Error('Invalid stream response from Mux');
-    }
-
-    // Get Firestore reference
-    const db = admin.firestore();
-    const roomRef = db.collection('sideRooms').doc(roomId);
-    const roomDoc = await roomRef.get();
-
-    if (!roomDoc.exists) {
-      throw new Error('Room not found');
-    }
-
-    // Update room with stream info
-    const updateData = {
-      streamId: stream.id,
-      streamKey: stream.stream_key,
-      playbackId: stream.playback_ids[0].id,
-      streamerId: userId,
-      isStreaming: true,
-      deviceType: deviceType || 'desktop',
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-
-    await roomRef.update(updateData);
-
-    res.json({
-      streamId: stream.id,
-      streamKey: stream.stream_key,
-      playbackId: stream.playback_ids[0].id,
-      status: 'active'
-    });
+    console.log('Stream created successfully:', stream);
+    res.json(stream);
   } catch (error) {
     console.error('Error creating stream:', error);
-    res.status(500).json({ 
-      error: 'Failed to create stream',
-      details: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Unified stream deletion endpoint
+// Enhanced stream deletion endpoint
 app.post('/api/delete-stream', async (req, res) => {
   try {
-    const { roomId, userId } = req.body;
-    if (!roomId || !userId) {
-      return res.status(400).json({ error: 'Room ID and User ID are required' });
+    console.log('Delete stream request received:', req.body);
+    const { streamId } = req.body;
+
+    if (!streamId) {
+      console.error('Missing streamId');
+      return res.status(400).json({ error: 'Missing streamId' });
     }
 
-    const db = admin.firestore();
-    const roomRef = db.collection('sideRooms').doc(roomId);
-    const roomDoc = await roomRef.get();
-
-    if (!roomDoc.exists) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-
-    const roomData = roomDoc.data();
-    if (roomData.streamerId !== userId) {
-      return res.status(403).json({ error: 'Not authorized to delete this stream' });
-    }
-
-    if (roomData.streamId) {
-      try {
-        await Video.LiveStreams.delete(roomData.streamId);
-      } catch (error) {
-        console.log('Error deleting Mux stream:', error);
-      }
-    }
-
-    await roomRef.update({
-      streamId: null,
-      streamKey: null,
-      playbackId: null,
-      streamerId: null,
-      isStreaming: false,
-      deviceType: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
+    await Mux.Video.LiveStreams.del(streamId);
+    console.log('Stream deleted successfully:', streamId);
     res.json({ message: 'Stream deleted successfully' });
   } catch (error) {
     console.error('Error deleting stream:', error);
-    res.status(500).json({ 
-      error: 'Failed to delete stream',
-      details: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
