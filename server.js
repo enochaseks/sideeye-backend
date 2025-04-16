@@ -27,7 +27,8 @@ if (process.env.NODE_ENV === 'production') {
   const corsOptions = {
     origin: process.env.FRONTEND_URL || 'https://sideeye.uk',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+    exposedHeaders: ['Content-Length', 'Content-Type'],
     credentials: true,
     maxAge: 86400 // 24 hours
   };
@@ -94,6 +95,23 @@ const upload = multer({
 });
 
 // Rate limiting
+const streamLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: process.env.NODE_ENV === 'production' ? 300 : 1000, // Higher limit for streaming
+  message: JSON.stringify({ 
+    error: 'Too many streaming requests',
+    details: 'Please try again after 15 minutes'
+  }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'Too many streaming requests',
+      details: 'Please try again after 15 minutes'
+    });
+  }
+});
+
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: process.env.NODE_ENV === 'production' ? 100 : 1000,
@@ -110,6 +128,8 @@ const apiLimiter = rateLimit({
     });
   }
 });
+
+app.use('/api/create-stream', streamLimiter);
 app.use('/api/', apiLimiter);
 
 // Health check endpoint
@@ -136,26 +156,16 @@ app.post('/api/create-stream', async (req, res) => {
       });
     }
 
-    const muxTokenId = process.env.MUX_TOKEN_ID;
-    const muxTokenSecret = process.env.MUX_TOKEN_SECRET;
-
-    if (!muxTokenId || !muxTokenSecret) {
-      console.error('Mux credentials not configured');
+    if (!Video) {
+      console.error('Mux Video client not initialized');
       return res.status(500).json({ 
         error: 'Stream service not configured',
-        details: 'Mux credentials are missing'
+        details: 'Mux client initialization failed'
       });
     }
 
-    console.log('Creating stream with Mux credentials:', {
-      tokenId: muxTokenId,
-      tokenSecret: muxTokenSecret ? '***' : undefined
-    });
-
-    const mux = new Mux(muxTokenId, muxTokenSecret);
-    
     try {
-      const stream = await mux.Video.LiveStreams.create({
+      const stream = await Video.LiveStreams.create({
         playback_policy: ['public'],
         new_asset_settings: {
           playback_policy: ['public']
