@@ -106,6 +106,12 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy' });
 });
 
+// API Routes
+app.use('/api', (req, res, next) => {
+  console.log(`API Request: ${req.method} ${req.path}`);
+  next();
+});
+
 // Create stream endpoint
 app.post('/api/create-stream', async (req, res) => {
   try {
@@ -284,6 +290,14 @@ app.use((err, req, res, next) => {
     : { error: err.message || 'Internal server error', stack: err.stack };
   
   res.status(err.status || 500).json(response);
+});
+
+// 404 handler for API routes
+app.use('/api', (req, res) => {
+  res.status(404).json({ 
+    error: 'Not found',
+    details: `API endpoint ${req.method} ${req.path} does not exist`
+  });
 });
 
 // 404 handler
