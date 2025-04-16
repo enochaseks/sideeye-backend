@@ -159,41 +159,47 @@ const upload = multer({
 
 // Rate limiting
 const streamLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === 'production' ? 300 : 1000, // Higher limit for streaming
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: process.env.NODE_ENV === 'production' ? 500 : 2000, // Increased limits
   message: JSON.stringify({ 
     error: 'Too many streaming requests',
-    details: 'Please try again after 15 minutes'
+    details: 'Please try again after 5 minutes'
   }),
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
     res.status(429).json({
       error: 'Too many streaming requests',
-      details: 'Please try again after 15 minutes'
+      details: 'Please try again after 5 minutes',
+      retryAfter: 300 // 5 minutes in seconds
     });
   }
 });
 
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === 'production' ? 100 : 1000,
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: process.env.NODE_ENV === 'production' ? 200 : 2000, // Increased limits
   message: JSON.stringify({ 
     error: 'Too many requests',
-    details: 'Please try again after 15 minutes'
+    details: 'Please try again after 5 minutes'
   }),
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
     res.status(429).json({
       error: 'Too many requests',
-      details: 'Please try again after 15 minutes'
+      details: 'Please try again after 5 minutes',
+      retryAfter: 300 // 5 minutes in seconds
     });
   }
 });
 
+// Apply rate limiting with more specific paths
 app.use('/api/create-stream', streamLimiter);
-app.use('/api/', apiLimiter);
+app.use('/api/delete-stream', streamLimiter);
+app.use('/api/streams', streamLimiter);
+app.use('/api/test', apiLimiter);
+app.use('/api/upload-image', apiLimiter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
