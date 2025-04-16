@@ -32,7 +32,12 @@ if (process.env.NODE_ENV === 'production') {
     credentials: true,
     maxAge: 86400 // 24 hours
   };
+
+  // Apply CORS middleware before other middleware
   app.use(cors(corsOptions));
+
+  // Add OPTIONS handler for preflight requests
+  app.options('*', cors(corsOptions));
 } else {
   app.use(cors());
 }
