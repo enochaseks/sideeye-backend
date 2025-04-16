@@ -97,37 +97,47 @@ try {
 
 // Initialize Mux
 let muxClient;
-try {
-  if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) {
-    console.error('Mux credentials missing:', {
-      hasTokenId: !!process.env.MUX_TOKEN_ID,
-      hasTokenSecret: !!process.env.MUX_TOKEN_SECRET
+async function initializeMux() {
+  try {
+    if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) {
+      console.error('Mux credentials missing:', {
+        hasTokenId: !!process.env.MUX_TOKEN_ID,
+        hasTokenSecret: !!process.env.MUX_TOKEN_SECRET
+      });
+      throw new Error('Mux credentials are not configured');
+    }
+    
+    muxClient = new Mux(process.env.MUX_TOKEN_ID, process.env.MUX_TOKEN_SECRET);
+    console.log('Mux client initialized successfully');
+    
+    // Test Mux connection
+    const testStream = await muxClient.Video.LiveStreams.create({
+      playback_policy: ['public'],
+      new_asset_settings: { playback_policy: ['public'] }
     });
-    throw new Error('Mux credentials are not configured');
+    console.log('Mux test stream created successfully:', testStream);
+    
+    // Clean up test stream
+    await muxClient.Video.LiveStreams.del(testStream.id);
+    console.log('Mux test stream deleted successfully');
+  } catch (error) {
+    console.error('Error initializing Mux client:', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code
+    });
+    process.exit(1);
   }
-  
-  muxClient = new Mux(process.env.MUX_TOKEN_ID, process.env.MUX_TOKEN_SECRET);
-  console.log('Mux client initialized successfully');
-  
-  // Test Mux connection
-  const testStream = await muxClient.Video.LiveStreams.create({
-    playback_policy: ['public'],
-    new_asset_settings: { playback_policy: ['public'] }
-  });
-  console.log('Mux test stream created successfully:', testStream);
-  
-  // Clean up test stream
-  await muxClient.Video.LiveStreams.del(testStream.id);
-  console.log('Mux test stream deleted successfully');
-} catch (error) {
-  console.error('Error initializing Mux client:', error);
-  console.error('Error details:', {
-    message: error.message,
-    stack: error.stack,
-    code: error.code
-  });
-  process.exit(1);
 }
+
+// Initialize Mux before starting the server
+initializeMux().then(() => {
+  console.log('Mux initialization complete, starting server...');
+}).catch(error => {
+  console.error('Failed to initialize Mux:', error);
+  process.exit(1);
+});
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
