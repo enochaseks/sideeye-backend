@@ -241,11 +241,11 @@ app.post('/api/sade-ai', async (req, res) => {
     const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.MISTRAL_API_KEY || "hYypWDeePWumugzfDdEBuRTalYxIyJG1"}`,
+        'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'mistral-medium', // or 'mistral-small', 'mistral-large' if you have access
+        model: 'mistral-medium',
         messages: [
           {
             role: 'system',
@@ -270,11 +270,11 @@ Just reply as yourself, Sade, in a natural, human way.
     });
 
     const data = await mistralRes.json();
-    if (data.choices && data.choices[0] && data.choices[0].message) {
-      res.json({ response: data.choices[0].message.content });
-    } else {
-      res.status(500).json({ error: "No response from Sade AI." });
-    }
+    let reply = data.choices && data.choices[0] && data.choices[0].message
+      ? data.choices[0].message.content
+      : null;
+
+    // --- POST-PROCESSING STARTS HERE ---
     if (reply) {
       // Remove "Sade AI:" or "Sade:" from the start
       reply = reply.replace(/^(Sade AI:|Sade:)\s*/i, '');
@@ -310,17 +310,17 @@ Just reply as yourself, Sade, in a natural, human way.
       }
 
       reply = reply
-    .split('\n')
-    .filter(line =>
-      !/^User:/i.test(line) &&
-      !/^Sade AI:/i.test(line) &&
-      !/^Sade:/i.test(line) &&
-      !/^\(If the user/i.test(line) // Remove lines like (If the user seems upset...)
-    )
-    .join('\n')
-    .trim();
+        .split('\n')
+        .filter(line =>
+          !/^User:/i.test(line) &&
+          !/^Sade AI:/i.test(line) &&
+          !/^Sade:/i.test(line) &&
+          !/^\(If the user/i.test(line)
+        )
+        .join('\n')
+        .trim();
 
-    reply = reply.replace(/\(If the user[^\)]*\)/gi, '');
+      reply = reply.replace(/\(If the user[^\)]*\)/gi, '');
 
       // Remove repeated user message (if the model echoes the prompt)
       if (reply.startsWith(message)) {
@@ -332,8 +332,7 @@ Just reply as yourself, Sade, in a natural, human way.
 
       // Optionally, remove double newlines or excessive whitespace
       reply = reply.replace(/\n{2,}/g, '\n').trim();
-    }
-    if (reply) {
+
       res.json({ response: reply });
     } else {
       res.status(500).json({ error: "No response from Sade AI." });
