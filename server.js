@@ -230,9 +230,6 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
-// Initialize Google Generative AI
-
-
 // Replace your /api/sade-ai endpoint with:
 app.post('/api/sade-ai', async (req, res) => {
   try {
@@ -411,6 +408,7 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
+// --- STATIC FILE SERVING (MUST BE LAST) ---
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
