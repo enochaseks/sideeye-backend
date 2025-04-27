@@ -304,7 +304,7 @@ Just reply as yourself, Sade, in a natural, human way.
         { pattern: /\bno problem\b/gi, replacement: 'no wahala' },
         { pattern: /\bthank you\b/gi, replacement: 'cheers' },
         { pattern: /\bI understand\b/gi, replacement: 'I dey feel you' },
-        { pattern: /\bI’m tired\b/gi, replacement: 'I don tire' },
+        { pattern: /\bI'm tired\b/gi, replacement: 'I don tire' },
         // Add more as you like!
       ];
       slangMap.forEach(({ pattern, replacement }) => {
@@ -420,5 +420,10 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
   process.exit(1);
+});
+
+app.use(express.static(path.join(__dirname, '../frontend/build')));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
