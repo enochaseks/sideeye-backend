@@ -427,3 +427,8 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
 
+app.use(cors({
+  origin: ['https://www.sideeye.uk', 'http://localhost:3000'],
+  credentials: true
+}));
+
