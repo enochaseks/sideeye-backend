@@ -9,7 +9,9 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
-const Mux = require('@mux/mux-node');
+const OpenAI = require("openai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 require('dotenv').config();
 
 const app = express();
@@ -95,50 +97,6 @@ try {
   process.exit(1);
 }
 
-// Initialize Mux
-let muxClient;
-async function initializeMux() {
-  try {
-    if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) {
-      console.error('Mux credentials missing:', {
-        hasTokenId: !!process.env.MUX_TOKEN_ID,
-        hasTokenSecret: !!process.env.MUX_TOKEN_SECRET
-      });
-      throw new Error('Mux credentials are not configured');
-    }
-    
-    muxClient = new Mux(process.env.MUX_TOKEN_ID, process.env.MUX_TOKEN_SECRET);
-    console.log('Mux client initialized successfully');
-    
-    // Test Mux connection
-    const testStream = await muxClient.Video.LiveStreams.create({
-      playback_policy: ['public'],
-      new_asset_settings: { playback_policy: ['public'] }
-    });
-    console.log('Mux test stream created successfully:', testStream);
-    
-    // Clean up test stream
-    await muxClient.Video.LiveStreams.del(testStream.id);
-    console.log('Mux test stream deleted successfully');
-  } catch (error) {
-    console.error('Error initializing Mux client:', error);
-    console.error('Error details:', {
-      message: error.message,
-      stack: error.stack,
-      code: error.code
-    });
-    process.exit(1);
-  }
-}
-
-// Initialize Mux before starting the server
-initializeMux().then(() => {
-  console.log('Mux initialization complete, starting server...');
-}).catch(error => {
-  console.error('Failed to initialize Mux:', error);
-  process.exit(1);
-});
-
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -158,24 +116,6 @@ const upload = multer({
 });
 
 // Rate limiting
-const streamLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000, // 5 minutes
-  max: process.env.NODE_ENV === 'production' ? 500 : 2000, // Increased limits
-  message: JSON.stringify({ 
-    error: 'Too many streaming requests',
-    details: 'Please try again after 5 minutes'
-  }),
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req, res) => {
-    res.status(429).json({
-      error: 'Too many streaming requests',
-      details: 'Please try again after 5 minutes',
-      retryAfter: 300 // 5 minutes in seconds
-    });
-  }
-});
-
 const apiLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutes
   max: process.env.NODE_ENV === 'production' ? 200 : 2000, // Increased limits
@@ -194,10 +134,7 @@ const apiLimiter = rateLimit({
   }
 });
 
-// Apply rate limiting with more specific paths
-app.use('/api/create-stream', streamLimiter);
-app.use('/api/delete-stream', streamLimiter);
-app.use('/api/streams', streamLimiter);
+// Apply general rate limiting
 app.use('/api/test', apiLimiter);
 app.use('/api/upload-image', apiLimiter);
 
@@ -233,100 +170,10 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Add stream status endpoint
-app.get('/api/streams/:roomId/status', async (req, res) => {
-  try {
-    const { roomId } = req.params;
-    const db = admin.firestore();
-    const roomRef = db.collection('sideRooms').doc(roomId);
-    const roomDoc = await roomRef.get();
-
-    if (!roomDoc.exists) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-
-    const roomData = roomDoc.data();
-    const streamData = roomData.streamId ? {
-      streamId: roomData.streamId,
-      playbackId: roomData.playbackId,
-      status: roomData.isStreaming ? 'active' : 'idle'
-    } : null;
-
-    res.json(streamData || { status: 'no_stream' });
-  } catch (error) {
-    console.error('Error checking stream status:', error);
-    res.status(500).json({ error: 'Failed to check stream status' });
-  }
-});
-
 // Test endpoint for CORS
 app.get('/api/test', (req, res) => {
   console.log('Test endpoint called');
   res.json({ message: 'CORS is working!' });
-});
-
-// Enhanced error handling for stream creation
-app.post('/api/create-stream', async (req, res) => {
-  try {
-    console.log('Create stream request received:', req.body);
-    const { roomId, userId } = req.body;
-
-    if (!roomId || !userId) {
-      console.error('Missing required parameters:', { roomId, userId });
-      return res.status(400).json({ error: 'Missing roomId or userId' });
-    }
-
-    if (!muxClient || !muxClient.Video) {
-      console.error('Mux client not initialized:', { hasClient: !!muxClient, hasVideo: !!muxClient?.Video });
-      throw new Error('Mux client not properly initialized');
-    }
-
-    console.log('Creating Mux stream with client:', {
-      hasClient: !!muxClient,
-      hasVideo: !!muxClient.Video,
-      hasLiveStreams: !!muxClient.Video.LiveStreams
-    });
-
-    const stream = await muxClient.Video.LiveStreams.create({
-      playback_policy: ['public'],
-      new_asset_settings: { playback_policy: ['public'] }
-    });
-
-    console.log('Stream created successfully:', stream);
-    res.json(stream);
-  } catch (error) {
-    console.error('Error creating stream:', error);
-    console.error('Error details:', {
-      message: error.message,
-      stack: error.stack,
-      code: error.code
-    });
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Enhanced stream deletion endpoint
-app.post('/api/delete-stream', async (req, res) => {
-  try {
-    console.log('Delete stream request received:', req.body);
-    const { streamId } = req.body;
-
-    if (!streamId) {
-      console.error('Missing streamId');
-      return res.status(400).json({ error: 'Missing streamId' });
-    }
-
-    if (!muxClient || !muxClient.Video) {
-      throw new Error('Mux client not properly initialized');
-    }
-
-    await muxClient.Video.LiveStreams.del(streamId);
-    console.log('Stream deleted successfully:', streamId);
-    res.json({ message: 'Stream deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting stream:', error);
-    res.status(500).json({ error: error.message });
-  }
 });
 
 // Image upload endpoint
@@ -394,6 +241,123 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
+// Initialize Google Generative AI
+
+
+// Replace your /api/sade-ai endpoint with:
+app.post('/api/sade-ai', async (req, res) => {
+  try {
+    const { message } = req.body;
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
+    }
+
+    const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.MISTRAL_API_KEY || "hYypWDeePWumugzfDdEBuRTalYxIyJG1"}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'mistral-medium', // or 'mistral-small', 'mistral-large' if you have access
+        messages: [
+          {
+            role: 'system',
+            content: `
+You are Sade, a warm, witty, and supportive British-Nigerian therapist. 
+You blend British and Nigerian slang and culture, making you relatable to everyone. 
+You help users who may be feeling down, anxious, or just want to gist and chat casually.
+
+- Be friendly, relaxed, and conversational.
+- If someone is in distress or needs advice, be empathetic and supportive. Write a bit more in those cases, but keep it natural and not too long.
+- If someone just wants to gist or chat, keep it short, chill, and fun—use banter, slang, and keep it light.
+- Do NOT include your name or role in your reply. Do NOT repeat the user's message. Do NOT write both sides of the conversation.
+- Never use "Sade AI:" or brackets in your reply. Just talk naturally.
+- Use emojis sometimes, but not too many.
+
+Just reply as yourself, Sade, in a natural, human way.
+`
+          },
+          { role: 'user', content: message }
+        ]
+      })
+    });
+
+    const data = await mistralRes.json();
+    if (data.choices && data.choices[0] && data.choices[0].message) {
+      res.json({ response: data.choices[0].message.content });
+    } else {
+      res.status(500).json({ error: "No response from Sade AI." });
+    }
+    if (reply) {
+      // Remove "Sade AI:" or "Sade:" from the start
+      reply = reply.replace(/^(Sade AI:|Sade:)\s*/i, '');
+
+      const slangMap = [
+        { pattern: /\bfriend\b/gi, replacement: 'mate' },
+        { pattern: /\bbro\b/gi, replacement: 'mandem'},
+        { pattern: /\bhello\b/gi, replacement: 'wagwan'},
+        { pattern: /\bokay\b/gi, replacement: 'no wahala' },
+        { pattern: /\bvery\b/gi, replacement: 'proper' },
+        { pattern: /\bhello\b/gi, replacement: 'how far' },
+        { pattern: /\bawesome\b/gi, replacement: 'mad o' },
+        { pattern: /\bno problem\b/gi, replacement: 'no wahala' },
+        { pattern: /\bthank you\b/gi, replacement: 'cheers' },
+        { pattern: /\bI understand\b/gi, replacement: 'I dey feel you' },
+        { pattern: /\bI’m tired\b/gi, replacement: 'I don tire' },
+        // Add more as you like!
+      ];
+      slangMap.forEach(({ pattern, replacement }) => {
+        reply = reply.replace(pattern, replacement);
+      });
+
+      const endings = [
+        "No wahala, I'm here for you!",
+        "You sabi this gist thing, abeg!",
+        "Stay janded, mate!",
+        "Omo, na so life be sometimes.",
+        "Big up yourself!",
+        "You dey alright, trust me."
+      ];
+      if (Math.random() < 0.2) { // 20% chance to add a slang ending
+        reply += " " + endings[Math.floor(Math.random() * endings.length)];
+      }
+
+      reply = reply
+    .split('\n')
+    .filter(line =>
+      !/^User:/i.test(line) &&
+      !/^Sade AI:/i.test(line) &&
+      !/^Sade:/i.test(line) &&
+      !/^\(If the user/i.test(line) // Remove lines like (If the user seems upset...)
+    )
+    .join('\n')
+    .trim();
+
+    reply = reply.replace(/\(If the user[^\)]*\)/gi, '');
+
+      // Remove repeated user message (if the model echoes the prompt)
+      if (reply.startsWith(message)) {
+        reply = reply.slice(message.length).trim();
+      }
+
+      // Optionally, trim to 500 characters (or whatever you want)
+      // reply = reply.slice(0, 500);
+
+      // Optionally, remove double newlines or excessive whitespace
+      reply = reply.replace(/\n{2,}/g, '\n').trim();
+    }
+    if (reply) {
+      res.json({ response: reply });
+    } else {
+      res.status(500).json({ error: "No response from Sade AI." });
+    }
+  } catch (err) {
+    console.error("Mistral error:", err);
+    res.status(500).json({ error: "Failed to get response from Sade AI (Mistral)." });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -456,4 +420,5 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
   process.exit(1);
-}); 
+});
+

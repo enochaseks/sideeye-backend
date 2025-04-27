@@ -4,6 +4,7 @@ const Mux = require('@mux/mux-node');
 const dotenv = require('dotenv');
 const admin = require('firebase-admin');
 const { handleFileUpload } = require('./upload');
+const { Configuration, OpenAIApi } = require("openai");
 
 // Load environment variables first
 dotenv.config();
@@ -24,6 +25,10 @@ const bucket = admin.storage().bucket();
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// You can store your API key in an environment variable for security
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "YOUR_OPENAI_API_KEY";
+const openai = new OpenAIApi(new Configuration({ apiKey: OPENAI_API_KEY }));
 
 app.post('/api/create-stream', async (req, res) => {
   try {
@@ -208,6 +213,32 @@ app.post('/api/upload-image', handleFileUpload('image'), async (req, res) => {
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({ error: 'Error uploading file' });
+  }
+});
+
+app.post('/api/sade-ai', async (req, res) => {
+  try {
+    const { message } = req.body;
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
+    }
+
+    // Call OpenAI's API (using GPT-3.5-turbo)
+    const completion = await openai.createChatCompletion({
+      model: "gpt-3.5-turbo", // or "gpt-4" if you have access
+      messages: [
+        { role: "system", content: "You are Sade AI, a compassionate AI therapist. Respond thoughtfully and helpfully." },
+        { role: "user", content: message }
+      ],
+      max_tokens: 150,
+      temperature: 0.7,
+    });
+
+    const aiResponse = completion.data.choices[0].message.content;
+    res.json({ response: aiResponse });
+  } catch (err) {
+    console.error("OpenAI error:", err);
+    res.status(500).json({ error: "Failed to get response from Sade AI." });
   }
 });
 
