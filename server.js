@@ -23,27 +23,16 @@ console.log('- Environment:', process.env.NODE_ENV);
 console.log('- Port:', PORT);
 console.log('- CORS Origin:', process.env.FRONTEND_URL);
 
-// CORS middleware with detailed logging
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  console.log(`Incoming request: ${req.method} ${req.path}`);
-  console.log(`Origin: ${origin}`);
-  console.log(`Headers:`, req.headers);
+// Place this BEFORE any routes or middleware that use CORS
+const allowedOrigins = [
+  'https://www.sideeye.uk',
+  'http://localhost:3000'
+];
 
-  // Allow requests from any origin in production
-  res.header('Access-Control-Allow-Origin', origin || '*');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    console.log('Handling OPTIONS preflight request');
-    return res.status(200).json({ message: 'CORS enabled' });
-  }
-
-  next();
-});
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
 
 // Trust proxy - important for Railway deployment
 app.set('trust proxy', 1);
@@ -426,9 +415,4 @@ app.use(express.static(path.join(__dirname, '../frontend/build')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
-
-app.use(cors({
-  origin: ['https://www.sideeye.uk', 'http://localhost:3000'],
-  credentials: true
-}));
 
