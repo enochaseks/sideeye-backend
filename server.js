@@ -23,10 +23,15 @@ const io = new Server(httpServer, {
     origin: ['https://www.sideeye.uk', 'http://localhost:3000'],
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+  maxHttpBufferSize: 1e7 // 10 MB for audio chunks (from server.ts)
 });
 
 const PORT = process.env.PORT || 8080;
+
+// Store active rooms and their participants (from server.ts)
+const rooms = new Map(); // Map<string, Set<string>> -> Map
+const userSockets = new Map(); // Map<string, string> -> Map
 
 // Log server configuration for debugging
 console.log('Server Configuration:');
@@ -392,25 +397,112 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// Socket.IO connection handling
+// Socket.IO connection handling (Replace existing simple handlers with detailed ones from server.ts)
 io.on('connection', (socket) => {
-  console.log('A user connected:', socket.id);
+  console.log('User connected:', socket.id);
 
+  // Handle joining room (from server.ts)
+  socket.on('join-room', (roomId, userId) => { // Remove TS type annotations
+    console.log(`User ${userId} joining room ${roomId}`);
+    socket.join(roomId);
+
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, new Set());
+    }
+    // Optional chaining (?.) might not be needed if check above guarantees existence
+    rooms.get(roomId).add(userId); // Remove TS optional chaining ?.
+    userSockets.set(userId, socket.id);
+
+    // Notify others in the room
+    socket.to(roomId).emit('user-joined', userId);
+
+    // Send current participants to the joining user
+    const participants = Array.from(rooms.get(roomId) || []); // Keep fallback for safety
+    socket.emit('room-users', participants);
+    console.log(`Room ${roomId} participants:`, participants);
+  });
+
+  // Handle audio stream (from server.ts)
+  socket.on('audio-stream', (data) => { // Assume data has { roomId, userId, audio }
+    // Broadcast audio to everyone else in the room
+    // Add basic check for properties to prevent errors
+    if (data && data.roomId && data.userId && data.audio) {
+      console.log(`Received audio from ${data.userId} in ${data.roomId}, broadcasting...`);
+      socket.to(data.roomId).emit('audio-stream', {
+        audio: data.audio,
+        userId: data.userId
+      });
+    } else {
+      console.warn('Received malformed audio-stream data:', data);
+    }
+  });
+
+  // Handle speaking status (from server.ts)
+  socket.on('user-speaking', (data) => { // Assume data has { roomId, userId, isSpeaking }
+    if (data && data.roomId && data.userId !== undefined && data.isSpeaking !== undefined) {
+      console.log(`User ${data.userId} speaking status in room ${data.roomId}:`, data.isSpeaking);
+      socket.to(data.roomId).emit('user-speaking', {
+        userId: data.userId,
+        isSpeaking: data.isSpeaking
+      });
+    } else {
+      console.warn('Received malformed user-speaking data:', data);
+    }
+  });
+
+  // Handle mute status (from server.ts)
+  socket.on('user-muted', (data) => { // Assume data has { roomId, userId, isMuted }
+     if (data && data.roomId && data.userId !== undefined && data.isMuted !== undefined) {
+      console.log(`User ${data.userId} mute status in room ${data.roomId}:`, data.isMuted);
+      socket.to(data.roomId).emit('user-muted', {
+        userId: data.userId,
+        isMuted: data.isMuted
+      });
+    } else {
+      console.warn('Received malformed user-muted data:', data);
+    }
+  });
+
+  // Handle leaving room (from server.ts)
+  socket.on('leave-room', (roomId, userId) => {
+    handleUserLeaveRoom(socket, roomId, userId);
+  });
+
+  // Handle disconnection (from server.ts)
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-  });
-
-  // Add your Socket.IO event handlers here
-  socket.on('join-room', (roomId) => {
-    socket.join(roomId);
-    console.log(`User ${socket.id} joined room ${roomId}`);
-  });
-
-  socket.on('leave-room', (roomId) => {
-    socket.leave(roomId);
-    console.log(`User ${socket.id} left room ${roomId}`);
+    // Find and remove user from all rooms
+    rooms.forEach((users, roomId) => {
+      // Find the userId associated with the disconnected socket.id
+      let userIdToRemove = null;
+      for (const [userId, socketId] of userSockets.entries()) {
+        if (socketId === socket.id) {
+          userIdToRemove = userId;
+          break;
+        }
+      }
+      // If the disconnected user was found in this room's users set via userSockets map
+      if (userIdToRemove && users.has(userIdToRemove)) {
+        handleUserLeaveRoom(socket, roomId, userIdToRemove);
+      }
+    });
   });
 });
+
+// Helper function from server.ts (translated to JS)
+function handleUserLeaveRoom(socket, roomId, userId) { // Remove TS types
+  console.log(`User ${userId} leaving room ${roomId}`);
+  socket.leave(roomId);
+  const room = rooms.get(roomId);
+  if (room) {
+    room.delete(userId);
+    if (room.size === 0) {
+      rooms.delete(roomId);
+    }
+  }
+  userSockets.delete(userId); // Remove user from the socket map
+  socket.to(roomId).emit('user-left', userId); // Notify others
+}
 
 // Start server
 httpServer.listen(PORT, () => {

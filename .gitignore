@@ -79,4 +79,4 @@ serviceAccountKey.json
 googleCloudKey.json
 
 # compiled output
-# /dist
+/dist
