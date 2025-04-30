@@ -12,9 +12,20 @@ const dotenv = require('dotenv');
 const OpenAI = require("openai");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const { createServer } = require('http');
+const { Server } = require('socket.io');
 require('dotenv').config();
 
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: ['https://www.sideeye.uk', 'http://localhost:3000'],
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
 const PORT = process.env.PORT || 8080;
 
 // Log server configuration for debugging
@@ -381,15 +392,35 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log('A user connected:', socket.id);
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+  });
+
+  // Add your Socket.IO event handlers here
+  socket.on('join-room', (roomId) => {
+    socket.join(roomId);
+    console.log(`User ${socket.id} joined room ${roomId}`);
+  });
+
+  socket.on('leave-room', (roomId) => {
+    socket.leave(roomId);
+    console.log(`User ${socket.id} left room ${roomId}`);
+  });
+});
+
 // Start server
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+httpServer.listen(PORT, () => {
+  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received. Closing HTTP server...');
-  server.close(() => {
+  httpServer.close(() => {
     console.log('HTTP server closed');
     admin.app().delete().then(() => {
       console.log('Firebase Admin SDK shutdown complete');
