@@ -39,35 +39,31 @@ console.log('- Environment:', process.env.NODE_ENV);
 console.log('- Port:', PORT);
 console.log('- CORS Origin:', process.env.FRONTEND_URL);
 
-// Place this BEFORE any routes or middleware that use CORS
 const allowedOrigins = [
   'https://www.sideeye.uk',
   'http://localhost:3000'
 ];
 
-app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
-    }
-    return callback(null, true);
-  },
+// Use simpler CORS config again
+const corsOptions = {
+  origin: allowedOrigins,
   credentials: true,
-}));
+  optionsSuccessStatus: 204 // some legacy browsers (IE11, various SmartTVs) choke on 204
+};
 
-// Trust proxy - important for Railway deployment
-app.set('trust proxy', 1);
+// Apply the main CORS middleware
+app.use(cors(corsOptions));
 
-// Basic middleware
+// Explicitly handle OPTIONS requests for the specific API route *before* other middleware
+// This ensures preflight requests get the right headers immediately.
+app.options('/api/sade-ai', cors(corsOptions)); 
+
+// Apply other middleware AFTER the OPTIONS handler and main CORS
+app.set('trust proxy', 1); // Trust proxy - important for Railway deployment
 app.use(compression());
 app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Basic security with helmet - after CORS
 app.use(helmet({
   crossOriginResourcePolicy: false,
   crossOriginOpenerPolicy: false,
@@ -254,7 +250,7 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
-// Replace your /api/sade-ai endpoint with:
+// Sade AI endpoint (NO NEED for app.options here again, handled above)
 app.post('/api/sade-ai', async (req, res) => {
   try {
     const { message } = req.body;
