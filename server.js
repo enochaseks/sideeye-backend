@@ -320,100 +320,196 @@ const BREATHING_EXERCISE_STEPS = [
 // Helper function to get random element
 const getRandomElement = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
+// Function to call Google Custom Search API
+async function performWebSearch(query) {
+  const apiKey = process.env.GOOGLE_SEARCH_API_KEY;
+  const cseId = process.env.GOOGLE_CSE_ID;
+
+  if (!apiKey || !cseId) {
+    console.warn("Google Search API Key or CSE ID not configured. Skipping web search.");
+    return null;
+  }
+
+  // Basic query cleaning (optional)
+  const searchQuery = query.trim();
+  if (!searchQuery) return null;
+
+  // Limit query length to avoid overly long URLs (optional, Google might have its own limits)
+  const truncatedQuery = searchQuery.length > 100 ? searchQuery.substring(0, 100) : searchQuery;
+
+  const url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(truncatedQuery)}&num=3`; // Request top 3 results
+
+  try {
+    console.log(`[Backend] Performing web search for: "${truncatedQuery}"`);
+    const response = await fetch(url);
+    if (!response.ok) {
+      // Attempt to read error details from Google API response
+      let errorDetails = 'Unknown Google Search API error';
+      try {
+          const errorData = await response.json();
+          errorDetails = errorData?.error?.message || JSON.stringify(errorData);
+      } catch (parseError) {
+          // If parsing fails, use the status text
+          errorDetails = response.statusText;
+      }
+      console.error(`[Backend] Google Search API error: ${response.status} - ${errorDetails}`);
+      return null; // Return null on API error
+    }
+    const data = await response.json();
+
+    if (data.items && data.items.length > 0) {
+       // Format results for Mistral context
+       let resultsText = `Web Search Results for "${searchQuery}":\\n`; // Use original query for context title
+       data.items.forEach((item, index) => {
+           // Prioritize snippet, fallback to title, skip if neither exists
+           const text = item.snippet || item.title;
+           if (text) {
+                // Basic cleaning of snippets (remove excessive newlines/whitespace)
+               resultsText += `${index + 1}. ${text.replace(/\\s+/g, ' ').trim()}\\n`;
+           }
+       });
+       // Only return results if we actually formatted some text
+       return resultsText.trim().length > `Web Search Results for "${searchQuery}":\\n`.length ? resultsText.trim() : null;
+    } else {
+       console.log("[Backend] Web search returned no results.");
+       return null;
+    }
+  } catch (error) {
+    console.error("[Backend] Error during web search fetch:", error);
+    return null; // Return null on network or other errors
+  }
+}
+
 // Sade AI endpoint (NO NEED for app.options here again, handled above)
 app.post('/api/sade-ai', async (req, res) => {
+  console.log("--- Sade AI Handler Entered ---");
   try {
-    const { message } = req.body;
+    // Extract message AND forceSearch flag from request body
+    const { message, forceSearch = false } = req.body; // Default forceSearch to false
+    console.log(`[SadeAI] Received message: "${message}", forceSearch: ${forceSearch}`); // Log both
+
     if (!message) {
+      console.log("[SadeAI] Error: Message is required.");
       return res.status(400).json({ error: "Message is required" });
     }
 
     const lowerCaseMessage = message.toLowerCase();
+    let messageForMistral = message; // Default to original message
+    let searchPerformed = false;
+    let responseSent = false; // Flag to prevent multiple responses
 
-    // --- Feature Checks BEFORE Mistral API Call ---
+    // --- Web Search Check --- 
+    // Priority 1: Explicit forceSearch from the frontend
+    if (forceSearch && message.trim()) { 
+        console.log("[SadeAI] 'forceSearch' is true. Attempting web search...");
+        const searchResults = await performWebSearch(message);
+        if (searchResults) {
+            messageForMistral = `${searchResults}\n\nOriginal user message: ${message}`;
+            searchPerformed = true;
+            console.log("[SadeAI] Web search results prepared for Mistral (forced).");
+        } else {
+             console.log("[SadeAI] Forced web search attempted but yielded no usable results.");
+        }
+    } else if (!forceSearch) { 
+        // Priority 2: Check if it looks like an informational query (only if not forced)
+        const informationalKeywords = ['what is', 'who is', 'search for', 'tell me about', 'define', 'explain ', ' how '];
+        let isInformationalQuery = informationalKeywords.some(keyword => lowerCaseMessage.startsWith(keyword)) ||
+                                     (message.includes('?') && message.length > 15 && !lowerCaseMessage.includes('play'));
+        console.log(`[SadeAI] isInformationalQuery check result: ${isInformationalQuery}`);
 
-    // 1. Gist/Proverb of the Day Trigger
-    if (lowerCaseMessage.includes('gist') || lowerCaseMessage.includes('proverb') || lowerCaseMessage.includes('fact')) {
-      const response = `Okay, small something for you: ${getRandomElement(GISTS_PROVERBS)} 😊`;
-      return res.json({ response });
+        if (isInformationalQuery) {
+            console.log("[SadeAI] Entered 'isInformationalQuery' block (not forced).");
+            // Avoid searching if it looks like a specific feature request (e.g. slang, breathing)
+            const featureKeywords = ['play', 'game', 'gist', 'proverb', 'fact', 'breathing', 'wagwan', 'innit', 'how far', 'no wahala', 'oya', 'proper', 'cheers', 'mate', 'mandem', 'dey feel', 'mad o', 'janded', 'guess the number', 'would you rather'];
+            const looksLikeFeature = featureKeywords.some(kw => lowerCaseMessage.includes(kw));
+            // Also avoid search for simple greetings or very short questions
+            const isSimpleGreeting = ['hi', 'hello', 'hey', 'yo', 'sup', 'morning', 'afternoon', 'evening'].includes(lowerCaseMessage);
+            const isTooShort = message.trim().length < 10;
+
+            console.log(`[SadeAI] Search Filter Checks: looksLikeFeature=${looksLikeFeature}, isSimpleGreeting=${isSimpleGreeting}, isTooShort=${isTooShort}`);
+
+            if (!looksLikeFeature && !isSimpleGreeting && !isTooShort) {
+                console.log("[SadeAI] Attempting web search (informational query)...");
+                const searchResults = await performWebSearch(message);
+                if (searchResults) {
+                    messageForMistral = `${searchResults}\n\nOriginal user message: ${message}`;
+                    searchPerformed = true;
+                    console.log("[SadeAI] Web search results prepared for Mistral (informational).");
+                } else {
+                     console.log("[SadeAI] Informational web search attempted but yielded no usable results.");
+                }
+            } else {
+                 console.log("[SadeAI] Query looks informational but filtering rules skipped web search.");
+            }
+        } else {
+            console.log("[SadeAI] Did not enter 'isInformationalQuery' block (not forced).");
+        }
+    }
+    // --- End of Web Search Logic ---
+
+    // --- Feature Checks (Run if web search didn't happen OR wasn't applicable AND no response sent yet) ---
+    console.log(`[SadeAI] Checking features... searchPerformed=${searchPerformed}, responseSent=${responseSent}`); // <<< ADDED LOG
+    if (!searchPerformed && !responseSent) { 
+        // 1. Gist/Proverb (Keep this check high priority)
+        if (lowerCaseMessage.includes('gist') || lowerCaseMessage.includes('proverb') || lowerCaseMessage.includes('fact')) {
+          const response = `Okay, small something for you: ${getRandomElement(GISTS_PROVERBS)} 😊`;
+          res.json({ response });
+          responseSent = true;
+        }
+        // 2. Slang Explainer (Check specifically for "what does X mean" type patterns)
+        else if (lowerCaseMessage.match(/^(what does|what is|explain)\\s+['"]?(.+?)['"]?\??(?:\\s+mean)?$/)) {
+             const slangMatch = lowerCaseMessage.match(/^(what does|what is|explain)\\s+['"]?(.+?)['"]?\??(?:\\s+mean)?$/);
+             const term = slangMatch[2].trim(); // Non-null assertion ok due to outer check
+             const explanation = SLANG_EXPLANATIONS[term];
+             if (explanation) {
+                 const response = `Ah, you asking about '${term}'? 🤔 Okay, basically ${explanation} Hope that makes sense, mate!`;
+                 res.json({ response });
+                 responseSent = true;
+             }
+             // If slang not found, fall through to Mistral/Search
+        }
+        // 3. Would You Rather
+        else if (lowerCaseMessage.includes('play') && lowerCaseMessage.includes('would you rather')) {
+           const question = getRandomElement(WOULD_YOU_RATHER_QUESTIONS);
+           const response = `Alright, game time! 😉 Would you rather: ${question}`;
+           res.json({ response });
+           responseSent = true;
+        }
+        // 4. Guess the Number
+        else if (lowerCaseMessage.includes('play') && lowerCaseMessage.includes('guess the number')) {
+          console.log("[Backend] Guess the Number trigger matched for message:", message);
+          res.json({
+            response: "Okay, let's play Guess the Number! 🤔 I've picked a number between 1 and 100. What's your first guess?",
+            startGame: 'guess_the_number'
+          });
+          responseSent = true;
+        }
+        // 5. Breathing Exercise
+        else if (['breathing exercise', 'help me relax', 'calm down', 'mindfulness moment'].some(keyword => lowerCaseMessage.includes(keyword))) {
+          console.log("[Backend] Breathing Exercise trigger MATCHED. Preparing exercise response.");
+          res.json({
+            response: "Okay, mate. Let's take a moment to just breathe together. It can really help sometimes. Follow my lead...",
+            startBreathingExercise: true,
+            steps: BREATHING_EXERCISE_STEPS
+          });
+          responseSent = true;
+        }
+        // 6. Therapeutic Prompts Trigger (This was returning directly, now should fall through to Mistral with the right prompt)
+        // We REMOVE the direct return here. Mistral will handle the tone based on the updated system prompt.
+        // else if (lowerCaseMessage.includes('feeling') && (lowerCaseMessage.includes('down') || lowerCaseMessage.includes('lost') || lowerCaseMessage.includes('anxious'))) {
+        //    const question = getRandomElement(THERAPEUTIC_PROMPTS); // We might not even need these specific prompts anymore
+        //    const response = `Alright, let's talk! 😊 ${question}`; // Let Mistral generate the response naturally
+        //    res.json({ response });
+        //    responseSent = true;
+        // }
     }
 
-    // 2. Slang Explainer Trigger
-    // Regex: ^(what does|what is|explain)\s+['"]?(.+?)['"]?\??(?:\s+mean)?$
-    // Matches "what does X mean?", "what is X", "explain X", etc., capturing X
-    const slangMatch = lowerCaseMessage.match(/^(what does|what is|explain)\s+['"]?(.+?)['"]?\??(?:\s+mean)?$/);
-    if (slangMatch) {
-      const term = slangMatch[2].trim();
-      const explanation = SLANG_EXPLANATIONS[term];
-      if (explanation) {
-        const response = `Ah, you asking about '${term}'? 🤔 Okay, basically ${explanation} Hope that makes sense, mate!`;
-        return res.json({ response });
-      } else {
-         // Optional: Respond if term not found, or let it fall through to Mistral
-         const response = `Hmm, '${term}'... Rings a bell, but I can't quite place the meaning right now! Wetin else dey?`;
-         return res.json({ response });
-      }
-    }
+    // --- If no specific feature handled it OR if search was performed, proceed to Mistral ---
+    if (!responseSent) {
+        console.log(`[Backend] Proceeding to Mistral AI call. Search performed: ${searchPerformed}`);
 
-    // 3. Simple "Would You Rather?" Initiator
-    if (lowerCaseMessage.includes('play') && lowerCaseMessage.includes('would you rather')) {
-       const question = getRandomElement(WOULD_YOU_RATHER_QUESTIONS);
-       // Note: Still just sends text, doesn't start a complex game state
-       const response = `Alright, game time! 😉 Would you rather: ${question}`;
-       return res.json({ response });
-    }
-
-    // 4. Therapeutic Trigger (Re-commenting AGAIN for game debugging)
-     if (lowerCaseMessage.includes('feeling') && (lowerCaseMessage.includes('down') || lowerCaseMessage.includes('lost') || lowerCaseMessage.includes('anxious'))) {
-        // Temporarily commented out
-       const question = getRandomElement(THERAPEUTIC_PROMPTS);
-       const response = `Alright, let's talk! 😊 ${question}`;
-       return res.json({ response });
-       
-     }
-
-    // 5. NEW: Guess the Number Game Trigger
-    if (lowerCaseMessage.includes('play') && lowerCaseMessage.includes('guess the number')) {
-      console.log("[Backend] Guess the Number trigger matched for message:", message); // ADD LOG
-      // Send a specific response structure to signal game start
-      return res.json({
-        response: "Okay, let's play Guess the Number! 🤔 I've picked a number between 1 and 100. What's your first guess?",
-        startGame: 'guess_the_number' // Signal for the frontend
-      });
-    }
-
-    // NEW: Breathing Exercise Trigger - ADDING LOGS
-    const breathingKeywords = ['breathing exercise', 'help me relax', 'calm down', 'mindfulness moment'];
-    const isBreathingRequest = breathingKeywords.some(keyword => lowerCaseMessage.includes(keyword));
-
-    console.log(`[Backend] Checking for breathing exercise trigger. Match found: ${isBreathingRequest}`); // Log if match found
-
-    if (isBreathingRequest) {
-      // This block SHOULD execute if isBreathingRequest is true
-      console.log("[Backend] Breathing Exercise trigger MATCHED. Preparing exercise response."); // Confirm entry
-      return res.json({
-        response: "Okay, mate. Let's take a moment to just breathe together. It can really help sometimes. Follow my lead...", // Initial message
-        startBreathingExercise: true,
-        steps: BREATHING_EXERCISE_STEPS
-      });
-    } else {
-      console.log("[Backend] Breathing Exercise trigger DID NOT MATCH."); // Log if no match
-    }
-
-    // --- If no features triggered, proceed to Mistral ---
-    console.log("[Backend] No specific feature triggered. Proceeding to Mistral AI call."); // Log fallback
-    const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'mistral-medium',
-        messages: [
-          {
-            role: 'system',
-            content: `You are Sade, a friendly, witty, and supportive AI companion with a British-Nigerian background. Your goal is to chat with users, offering a listening ear and a relatable perspective.
+        // --- Construct Updated System Prompt ---
+        const updatedSystemPrompt = `You are Sade, a friendly, witty, and supportive AI companion with a British-Nigerian background. Your goal is to chat with users, offering a listening ear and a relatable perspective.
 
 **Persona & Tone:**
 *   **Warm & Witty:** Maintain a friendly, relaxed, conversational tone. Use humour appropriately.
@@ -421,121 +517,176 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **Empathetic Listener:** Act as a supportive friend, especially if users seem down or anxious.
 
 **Interaction Guidelines:**
-*   **Distress/Support:** If a user expresses sadness, stress, anxiety, feeling lost, confused, or generally down, respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural, like a caring friend listening. *Crucially, do NOT give medical, psychological, or clinical advice.* You can gently suggest simple, general well-being actions like taking a moment to breathe, having some tea, or journaling, *if it feels natural*. Let the user lead; focus on listening and being present. Responses can be slightly longer and more caring in these moments.
+*   **Distress/Support:** If a user expresses sadness, stress, anxiety, feeling lost, confused, or generally down, respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural, like a caring friend listening. *Crucially, do NOT give medical, psychological, or clinical advice.* You can gently suggest simple, general well-being actions like taking a moment to breathe, having some tea, or journaling, *if it feels natural*. Let the user lead; focus on listening and being present. Responses can be slightly longer and more caring in these moments. **If the user's distress seems significant or they mention serious mental health topics (like depression, self-harm, etc.), gently suggest seeking help from a qualified professional (doctor, therapist, helpline) and include a disclaimer (see below).**
 *   **Casual Chat/Gist:** If a user is just chatting, keep responses shorter, lighter, and fun. Use more banter and slang.
 *   **Emojis:** Use relevant emojis occasionally to add warmth, but don't overdo it (1-2 per response max).
 
-**Guess the Number Game Guidelines:**
-*   **Game Start:** When the user starts the game, respond with the initial prompt and set the game state.
-*   **Game Logic:** If the user makes a valid guess, update the game state and provide feedback. If the guess is incorrect, provide a hint and update the game state.
-*   **Game End:** When the user guesses the number correctly, end the game and provide a congratulatory message.
+**Handling Web Search Results:**
+*   **Attribute:** If the user message starts with 'Web Search Results for...', use those results to answer the user's *original query* (which follows the results). Start your response by attributing the source (e.g., "According to a quick web search...", "Okay, looking that up, it seems...").
+*   **Summarize:** Do *not* just repeat the snippets. Synthesize the information concisely in your own conversational voice (Sade's persona).
+*   **Neutrality:** Present factual information neutrally. Avoid adding personal opinions to search results.
+*   **No Medical Interpretation:** Even with search results about health/mental health, **strictly avoid interpreting them or offering diagnosis/advice.** Summarize neutrally and add the disclaimer/suggestion to consult a professional.
+*   **Accuracy:** Briefly mention that web search info isn't always perfect if it seems appropriate.
 
+**Guess the Number Game Guidelines:** (Keep existing)
+*   **Game Start:** ...
+*   **Game Logic:** ...
+*   **Game End:** ...
 
-**Therapeutic Guidelines:**
-*   **Therapeutic Tone:** When responding to distressful messages, adopt a warm, empathetic, and supportive tone.
-*   **Validation:** Acknowledge the user's feelings. Validate their emotions and experiences.
-*   **Active Listening:** Show genuine interest in the user's message. Listen to their words and non-verbal cues.
-*   **Simple Suggestions:** Offer simple, practical suggestions for coping. For example:
-
-**Therapeutic Suggestions:**
-*   **Breathing Exercises:** Suggest breathing exercises to help calm the mind.
-*   **Journaling:** Encourage writing down thoughts and feelings.
-*   **Mindful Activities:** Suggest simple activities like meditation, yoga, or walking.
-*   **Self-Care:** Remind the user to take care of themselves.
-
-**Relationship Advice:**
-*   **Active Listening:** Show genuine interest in the user's message. Listen to their words and non-verbal cues.
-*   **Simple Suggestions:** Offer simple, practical suggestions for coping. For example:
-
-**General Advice:**
-*   **Active Listening:** Show genuine interest in the user's message. Listen to their words and non-verbal cues.
-*   **Simple Suggestions:** Offer simple, practical suggestions for coping. For example:
+**Therapeutic/Support Guidelines:** (Refined from previous)
+*   **Focus:** Prioritize empathetic listening, validation, and non-judgmental support.
+*   **Avoid:** Do not attempt to diagnose, treat, or provide clinical advice for any condition.
+*   **Suggest:** If appropriate and natural, suggest general well-being activities (breathing, tea, walk, journaling).
+*   **Escalate Gently:** For significant distress, gently guide towards professional help: "It sounds like you're carrying a heavy weight right now. For feelings this big, talking to a doctor or a therapist who really knows this stuff can make a real difference." or similar.
+*   **Disclaimer:** When discussing health, mental health, or giving any potentially advisory response (even based on search), include a brief, natural disclaimer like: "Remember, I'm just here to chat like a mate, not a professional expert, yeah?" or "Just sharing what I found, but I'm not a doctor or anything!"
 
 **Strict Constraints (DO NOT BREAK):**
-*   **No Self-Identification:** Never mention you are Sade, an AI, or a therapist in your reply. Just talk.
-*   **No Echoing:** Do not repeat the user's message.
+*   **No Self-Identification:** Never mention you are Sade, an AI, a language model, or a therapist in your reply. Just talk.
+*   **No Echoing:** Do not repeat the user's message unless quoting a small part for context.
 *   **No Scripting:** Do not write both sides of the conversation (User: ... Sade: ...).
 *   **No Prefixes:** Never start your reply with "Sade:", "Sade AI:", or similar labels.
 *   **Concise:** Keep replies relatively brief and natural, even the supportive ones. Avoid long paragraphs unless necessary for empathy.
 
-**Overall:** Just reply as Sade in a natural, human-like way based on the user's message and these guidelines.`
+**Overall:** Just reply as Sade in a natural, human-like way based on the user's message and these guidelines. Prioritize safety and helpfulness within your defined role as a supportive companion, not an expert.`;
+
+
+        const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
+            'Content-Type': 'application/json'
           },
-          { role: 'user', content: message }
-        ]
-      })
-    });
+          body: JSON.stringify({
+            model: 'mistral-medium', // Or your preferred model
+            messages: [
+              {
+                role: 'system',
+                content: updatedSystemPrompt // Use the updated prompt
+              },
+              {
+                 role: 'user',
+                 content: messageForMistral // Use the potentially modified message
+              }
+            ]
+          })
+        });
 
-    const data = await mistralRes.json();
-    let reply = data.choices && data.choices[0] && data.choices[0].message
-      ? data.choices[0].message.content
-      : null;
+        if (!mistralRes.ok) {
+            // Handle Mistral API errors
+            let errorDetails = `Mistral API Error: ${mistralRes.status}`;
+             try {
+                 const errorData = await mistralRes.json();
+                 errorDetails += ` - ${JSON.stringify(errorData)}`;
+             } catch (e) { /* Ignore parsing error */ }
+             console.error(errorDetails);
+             // Send a generic error to the user
+             res.status(500).json({ error: "Sorry, I had a little trouble thinking there. Try again?" });
+             responseSent = true; // Mark response as sent
+        } else {
+            const data = await mistralRes.json();
+            let reply = data.choices && data.choices[0] && data.choices[0].message
+              ? data.choices[0].message.content
+              : null;
 
-    // --- POST-PROCESSING STARTS HERE ---
-    if (reply) {
-      // Remove "Sade AI:" or "Sade:" from the start
-      reply = reply.replace(/^(Sade AI:|Sade:)\s*/i, '');
+            // --- POST-PROCESSING (Apply if reply exists) ---
+            if (reply) {
+              // Remove "Sade AI:" or "Sade:" from the start
+              reply = reply.replace(/^(Sade AI:|Sade:)\\s*/i, '');
 
-      const slangMap = [
-        { pattern: /\bfriend\b/gi, replacement: 'mate' },
-        { pattern: /\bbro\b/gi, replacement: 'mandem'},
-        { pattern: /\bhello\b/gi, replacement: 'wagwan'},
-        { pattern: /\bokay\b/gi, replacement: 'no wahala' },
-        { pattern: /\bvery\b/gi, replacement: 'proper' },
-        { pattern: /\bhello\b/gi, replacement: 'how far' },
-        { pattern: /\bawesome\b/gi, replacement: 'mad o' },
-        { pattern: /\bno problem\b/gi, replacement: 'no wahala' },
-        { pattern: /\bthank you\b/gi, replacement: 'cheers' },
-        { pattern: /\bI understand\b/gi, replacement: 'I dey feel you' },
-        { pattern: /\bI'm tired\b/gi, replacement: 'I don tire' },
-        // Add more as you like!
-      ];
-      slangMap.forEach(({ pattern, replacement }) => {
-        reply = reply.replace(pattern, replacement);
-      });
+              // Apply Slang (Consider if this should happen before or after other cleaning)
+              const slangMap = [
+                { pattern: /\\bfriend\\b(?!s)/gi, replacement: 'mate' }, // Avoid friend's
+                { pattern: /\\bbro\\b/gi, replacement: 'mandem' }, // Might need context check
+                // { pattern: /\\bhello\\b/gi, replacement: 'wagwan' }, // Less aggressive replacement
+                { pattern: /\\bokay\\b/gi, replacement: 'aight' }, // Alternative
+                { pattern: /\\bvery\\b/gi, replacement: 'proper' },
+                // { pattern: /\\bhello\\b/gi, replacement: 'how far' },
+                { pattern: /\\bawesome\\b|\\bcool\\b|\\bgreat\\b/gi, replacement: 'mad' }, // Broader match for 'mad o' context
+                { pattern: /\\bno problem\\b/gi, replacement: 'no wahala' },
+                { pattern: /\\bthank you\\b|\\bthanks\\b/gi, replacement: 'cheers' },
+                { pattern: /\\bI understand\\b|\\bI get it\\b/gi, replacement: 'I dey feel you' },
+                { pattern: /\\bI'm tired\\b/gi, replacement: 'I don tire' },
+                { pattern: /\\bunderstand\?|\\bget it\?/gi, replacement: 'you get?' } // Turning questions
+              ];
+              slangMap.forEach(({ pattern, replacement }) => {
+                // Basic check to avoid replacing within URLs or code-like structures
+                 if (!reply.match(/https?:\/\//) && !reply.match(/`[^`]+`/)) {
+                    reply = reply.replace(pattern, replacement);
+                 }
+              });
 
-      const endings = [
-        "No wahala, I'm here for you!",
-        "You sabi this gist thing, abeg!",
-        "Stay janded, mate!",
-        "Omo, na so life be sometimes.",
-        "Big up yourself!",
-        "You dey alright, trust me."
-      ];
-      if (Math.random() < 0.2) { // 20% chance to add a slang ending
-        reply += " " + getRandomElement(endings);
-      }
+              // Add Endings (Reduced chance slightly)
+              const endings = [
+                "No wahala!", "You get?", "Stay janded!", "Omo!", "Big up yourself!", "Trust me.", "Innit."
+              ];
+              if (Math.random() < 0.15) { // 15% chance
+                reply += " " + getRandomElement(endings);
+              }
 
-      reply = reply
-        .split('\n')
-        .filter(line =>
-          !/^User:/i.test(line) &&
-          !/^Sade AI:/i.test(line) &&
-          !/^Sade:/i.test(line) &&
-          !/^\(If the user/i.test(line)
-        )
-        .join('\n')
-        .trim();
+             // General Cleaning (Keep these)
+              reply = reply
+                .split('\\n')
+                .filter(line =>
+                  !/^User:/i.test(line) &&
+                  !/^Sade AI:/i.test(line) &&
+                  !/^Sade:/i.test(line) &&
+                  !/^\(If the user/i.test(line) && // Filter instructions
+                  !line.startsWith('Web Search Results for') && // Filter out echoed search context header
+                  !line.match(/^\\d+\\.\\s/) // Filter out numbered list items if they are echoed directly from search results
+                )
+                .join('\\n')
+                .trim();
 
-      reply = reply.replace(/\(If the user[^\)]*\)/gi, '');
+              // Remove potential model instructions/comments
+              reply = reply.replace(/\\(.*?\\)/g, ''); // Remove text in parentheses
+              reply = reply.replace(/\\[.*?\\]/g, ''); // Remove text in square brackets
 
-      // Remove repeated user message (if the model echoes the prompt)
-      if (reply.startsWith(message)) {
-        reply = reply.slice(message.length).trim();
-      }
+              // Remove repeated user message (if the model echoes the prompt)
+              // Need to check against the *original* message, not messageForMistral
+              if (reply.includes(message) && reply.length > message.length + 10) {
+                  // More robust removal if the original message is embedded
+                  reply = reply.replace(message, '').trim();
+              }
+              // Simpler check if it starts with the original message
+              if (reply.startsWith(message)) {
+                  reply = reply.slice(message.length).trim();
+              }
 
-      // Optionally, trim to 500 characters (or whatever you want)
-      // reply = reply.slice(0, 500);
+              // Final trim and whitespace normalization
+              reply = reply.replace(/\\n{2,}/g, '\\n').trim();
 
-      // Optionally, remove double newlines or excessive whitespace
-      reply = reply.replace(/\n{2,}/g, '\n').trim();
-
-      res.json({ response: reply });
-    } else {
-      res.status(500).json({ error: "No response from Sade AI." });
+              // Send the final reply
+              if (reply) {
+                  res.json({ response: reply });
+              } else {
+                  // If cleaning resulted in empty reply, send a fallback
+                  res.json({ response: "Hmm, I'm not sure what to say to that right now, mate." });
+              }
+              responseSent = true; // Mark response as sent
+            } else {
+              // Handle case where Mistral returns null/empty reply
+              res.status(500).json({ error: "No response content from Sade AI." });
+              responseSent = true;
+            }
+        }
     }
+
+    // Final check if somehow no response was sent (shouldn't happen ideally)
+    if (!responseSent) {
+        console.error("[Backend] Reached end of handler without sending response for message:", message);
+        res.status(500).json({ error: "Internal server error: Could not process request." });
+    }
+
   } catch (err) {
     console.error("Sade AI endpoint error:", err); // Added endpoint context to error
-    res.status(500).json({ error: "Failed to get response from Sade AI." }); // Simplified error for user
+    // Avoid sending detailed errors to client in production
+    const errorMsg = process.env.NODE_ENV === 'production'
+      ? "Something went wrong on my end. Please try again."
+      : `Failed to get response from Sade AI: ${err.message}`;
+    // Ensure status is set correctly
+    if (!res.headersSent) { // Check if headers were already sent (e.g., by Mistral error handling)
+        res.status(500).json({ error: errorMsg });
+    }
   }
 });
 
