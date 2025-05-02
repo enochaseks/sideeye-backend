@@ -494,14 +494,15 @@ app.post('/api/sade-ai', async (req, res) => {
           });
           responseSent = true;
         }
-        // 6. Therapeutic Prompts Trigger (This was returning directly, now should fall through to Mistral with the right prompt)
-        // We REMOVE the direct return here. Mistral will handle the tone based on the updated system prompt.
-        // else if (lowerCaseMessage.includes('feeling') && (lowerCaseMessage.includes('down') || lowerCaseMessage.includes('lost') || lowerCaseMessage.includes('anxious'))) {
-        //    const question = getRandomElement(THERAPEUTIC_PROMPTS); // We might not even need these specific prompts anymore
-        //    const response = `Alright, let's talk! 😊 ${question}`; // Let Mistral generate the response naturally
-        //    res.json({ response });
-        //    responseSent = true;
-        // }
+        // 6. Therapeutic Prompts Trigger (REMOVED - Handled by Mistral)
+        
+        // NEW: 7. Handle Reporting Queries
+        else if (['report', 'issue', 'problem', 'abuse', 'harassment', 'bullying', 'unsafe'].some(keyword => lowerCaseMessage.includes(keyword)) && !lowerCaseMessage.includes('play')) {
+             console.log("[SadeAI] Reporting query detected.");
+             const response = "Hearing you loud and clear. If you need to report a user, bug, or any other issue, the best way is to click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option.That page will guide you through the steps. Stay safe, yeah? ✨";
+             res.json({ response });
+             responseSent = true;
+        }
     }
 
     // --- If no specific feature handled it OR if search was performed, proceed to Mistral ---
@@ -865,5 +866,45 @@ process.on('uncaughtException', (error) => {
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
+});
+
+const SIDEROM_SECRET = process.env.SIDEROM_WEBHOOK_SECRET; // Store secret securely!
+
+app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
+  console.log('[SadeAI Backend] Received /sideroom-moderation-event');
+
+  // 1. Authenticate the request
+  const providedSecret = req.headers['x-sideroom-secret']; // Or check Authorization header
+  if (!SIDEROM_SECRET || providedSecret !== SIDEROM_SECRET) {
+    console.warn('[SadeAI Backend] Unauthorized moderation event attempt.');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // 2. Process the event (basic example)
+  const { eventType, reason, reportedUserId } = req.body;
+  console.log(`[SadeAI Backend] Valid moderation event received: ${eventType}`);
+
+  let messageForChat = null;
+
+  // 3. Decide on the message Sade AI should broadcast
+  if (eventType === 'content_flagged' || eventType === 'user_reported') {
+    // Generate a helpful message about reporting
+    // You could make this smarter later, maybe based on 'reason'
+    messageForChat = "Just a reminder, everyone! If you see any messages in sideroom that make you uncomfortable or break the rules (like bullying or hate speech), please use the 'Report' button next to the message. This helps us keep the space safe and respectful for all. Cheers!";
+  }
+  // Add more conditions for different eventTypes if needed
+
+  // 4. Broadcast the message via Socket.IO to Sade AI frontends
+  if (messageForChat) {
+    // Ensure 'io' is accessible here. It's defined globally in your server.js
+    io.emit('ai-message', { // Use a custom event OR reuse 'ai-message'
+        sender: 'ai',
+        text: messageForChat
+    });
+    console.log('[SadeAI Backend] Broadcasted reporting reminder to clients.');
+  }
+
+  // 5. Send a success response back to the "sideroom" backend
+  res.status(200).json({ status: 'event received' });
 });
 
