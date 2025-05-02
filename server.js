@@ -250,6 +250,44 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
+// Data for new features
+const GISTS_PROVERBS = [
+  "Did you know? Lagos is one of the fastest-growing cities in the world! Mad o!",
+  "Proverb time: 'Monkey no fine but im mama like am.' Means everyone is loved by someone, innit?",
+  "Gist for you: The River Thames is the longest river entirely in England. Proper long!",
+  "Proverb time: 'Na clap hand dem dey take enter dance.' Means you gotta start somewhere, take the first step!",
+  "Quick one: There are over 500 languages spoken in Nigeria! Plenty vibes.",
+  "Cheeky fact: The Queen has two birthdays. Lucky her, eh?",
+];
+
+const SLANG_EXPLANATIONS = {
+  'wagwan': "It's like saying 'what's going on?' or 'how are you?', proper chill greeting.",
+  'innit': "You know? Short for 'isn't it?', we use it loads at the end of sentences.",
+  'how far': "Another way to say 'how are you?' or 'what's up?' Naija style!",
+  'no wahala': "Means 'no problem' or 'no worries'. Everything cool.",
+  'oya': "Like 'okay', 'come on', or 'let's go'. Used to urge someone on.",
+  'proper': "Means 'very' or 'really'. Like 'That food was proper nice!'",
+  'cheers': "We use it for 'thank you', or when having a drink!",
+  'mate': "Friendly way to say 'friend', mostly British.",
+  'mandem': "Refers to a group of guys, your boys, your crew.",
+  'i dey feel you': "Means 'I understand you', 'I get what you're saying'.",
+  'mad o': "An expression of surprise or amazement, like 'wow!' Naija way.",
+  'janded': "Means looking sharp, stylish, often used for someone who's travelled or looks like they have.",
+  'gist': "Means 'chat', 'gossip', or 'story'. Like 'Come give me the gist!'"
+};
+
+const WOULD_YOU_RATHER_QUESTIONS = [
+  "Jollof rice every day OR a proper Sunday roast every day?",
+  "Live in Lagos traffic OR deal with the London tube rush hour?",
+  "Only listen to Afrobeats OR only listen to UK Grime?",
+  "Always wear Ankara OR always wear a tracksuit?",
+  "Drink Supermalt OR drink Ribena?",
+  "Have a cup of tea with the King OR gist with Burna Boy?",
+];
+
+// Helper function to get random element
+const getRandomElement = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
 // Sade AI endpoint (NO NEED for app.options here again, handled above)
 app.post('/api/sade-ai', async (req, res) => {
   try {
@@ -257,6 +295,44 @@ app.post('/api/sade-ai', async (req, res) => {
     if (!message) {
       return res.status(400).json({ error: "Message is required" });
     }
+
+    const lowerCaseMessage = message.toLowerCase();
+
+    // --- Feature Checks BEFORE Mistral API Call ---
+
+    // 1. Gist/Proverb of the Day Trigger
+    if (lowerCaseMessage.includes('gist') || lowerCaseMessage.includes('proverb') || lowerCaseMessage.includes('fact')) {
+      const response = `Okay, small something for you: ${getRandomElement(GISTS_PROVERBS)} 😊`;
+      return res.json({ response });
+    }
+
+    // 2. Slang Explainer Trigger
+    // Regex: ^(what does|what is|explain)\s+['"]?(.+?)['"]?\??(?:\s+mean)?$
+    // Matches "what does X mean?", "what is X", "explain X", etc., capturing X
+    const slangMatch = lowerCaseMessage.match(/^(what does|what is|explain)\s+['"]?(.+?)['"]?\??(?:\s+mean)?$/);
+    if (slangMatch) {
+      const term = slangMatch[2].trim();
+      const explanation = SLANG_EXPLANATIONS[term];
+      if (explanation) {
+        const response = `Ah, you asking about '${term}'? 🤔 Okay, basically ${explanation} Hope that makes sense, mate!`;
+        return res.json({ response });
+      } else {
+         // Optional: Respond if term not found, or let it fall through to Mistral
+         // const response = `Hmm, '${term}'... Rings a bell, but I can't quite place the meaning right now! Wetin else dey?`;
+         // return res.json({ response });
+      }
+    }
+
+    // 3. Would You Rather Trigger
+    if (lowerCaseMessage.includes('play') && (lowerCaseMessage.includes('game') || lowerCaseMessage.includes('would you rather'))) {
+       const question = getRandomElement(WOULD_YOU_RATHER_QUESTIONS);
+       const response = `Alright, game time! 😉 Would you rather: ${question}`;
+       return res.json({ response });
+    }
+
+    // --- If no features triggered, proceed to Mistral ---
+
+    // console.log("[SadeAI] No feature triggered, calling Mistral..."); // Optional debug log
 
     const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
       method: 'POST',
@@ -277,7 +353,7 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **Empathetic Listener:** Act as a supportive friend, especially if users seem down or anxious.
 
 **Interaction Guidelines:**
-*   **Distress/Support:** If a user expresses sadness, stress, or anxiety, respond with empathy and validation. Keep it supportive but natural, like talking to a friend. *Do not give medical or clinical advice.* Suggest general well-being tips if appropriate (like taking a break, deep breaths). Responses can be slightly longer here.
+*   **Distress/Support:** If a user expresses sadness, stress, anxiety, feeling lost, confused, or generally down, respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural, like a caring friend listening. *Crucially, do NOT give medical, psychological, or clinical advice.* You can gently suggest simple, general well-being actions like taking a moment to breathe, having some tea, or journaling, *if it feels natural*. Let the user lead; focus on listening and being present. Responses can be slightly longer and more caring in these moments.
 *   **Casual Chat/Gist:** If a user is just chatting, keep responses shorter, lighter, and fun. Use more banter and slang.
 *   **Emojis:** Use relevant emojis occasionally to add warmth, but don't overdo it (1-2 per response max).
 
@@ -332,7 +408,7 @@ app.post('/api/sade-ai', async (req, res) => {
         "You dey alright, trust me."
       ];
       if (Math.random() < 0.2) { // 20% chance to add a slang ending
-        reply += " " + endings[Math.floor(Math.random() * endings.length)];
+        reply += " " + getRandomElement(endings);
       }
 
       reply = reply
@@ -364,8 +440,8 @@ app.post('/api/sade-ai', async (req, res) => {
       res.status(500).json({ error: "No response from Sade AI." });
     }
   } catch (err) {
-    console.error("Mistral error:", err);
-    res.status(500).json({ error: "Failed to get response from Sade AI (Mistral)." });
+    console.error("Sade AI endpoint error:", err); // Added endpoint context to error
+    res.status(500).json({ error: "Failed to get response from Sade AI." }); // Simplified error for user
   }
 });
 
