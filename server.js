@@ -283,6 +283,15 @@ const WOULD_YOU_RATHER_QUESTIONS = [
   "Have a cup of tea with the King OR gist with Burna Boy?",
 ];
 
+const GUESS_THE_NUMBER_PROMPTS = [
+  "I'm thinking of a number between 1 and 100. Can you guess it?",
+  "Is it even or odd?",
+  "What's the number?",
+  "Is it higher or lower than 50?",
+  "What's your guess?",
+  "You're close, but not quite there yet.",
+];
+
 const THERAPEUTIC_PROMPTS = [
   "I'm feeling a bit down today",
   "Can we just talk?",
@@ -294,6 +303,19 @@ const THERAPEUTIC_PROMPTS = [
   "I'm feeling a bit lost",
 ];
 
+// NEW: Define Breathing Exercise Steps
+const BREATHING_EXERCISE_STEPS = [
+  { text: "Alright, find a comfy spot if you can. Ready?", duration: 3 }, // Short pause
+  { text: "Let's start. Breathe in slowly through your nose... 👃", duration: 4 },
+  { text: "Hold your breath gently...", duration: 4 },
+  { text: "Now, breathe out slowly through your mouth... 👄", duration: 6 },
+  { text: "Good. Let's go again. Breathe in...", duration: 4 },
+  { text: "Hold gently...", duration: 4 },
+  { text: "And breathe out slowly...", duration: 6 },
+  { text: "One more time. Inhale...", duration: 4 },
+  { text: "Hold...", duration: 4 },
+  { text: "And exhale...", duration: 6 },
+];
 
 // Helper function to get random element
 const getRandomElement = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -328,29 +350,58 @@ app.post('/api/sade-ai', async (req, res) => {
         return res.json({ response });
       } else {
          // Optional: Respond if term not found, or let it fall through to Mistral
-         // const response = `Hmm, '${term}'... Rings a bell, but I can't quite place the meaning right now! Wetin else dey?`;
-         // return res.json({ response });
+         const response = `Hmm, '${term}'... Rings a bell, but I can't quite place the meaning right now! Wetin else dey?`;
+         return res.json({ response });
       }
     }
 
-    // 3. Would You Rather Trigger
-    if (lowerCaseMessage.includes('play') && (lowerCaseMessage.includes('game') || lowerCaseMessage.includes('would you rather'))) {
+    // 3. Simple "Would You Rather?" Initiator
+    if (lowerCaseMessage.includes('play') && lowerCaseMessage.includes('would you rather')) {
        const question = getRandomElement(WOULD_YOU_RATHER_QUESTIONS);
+       // Note: Still just sends text, doesn't start a complex game state
        const response = `Alright, game time! 😉 Would you rather: ${question}`;
        return res.json({ response });
     }
 
-    // 4. Therapeutic Trigger
-    if (lowerCaseMessage.includes('feeling') && (lowerCaseMessage.includes('down') || lowerCaseMessage.includes('lost') || lowerCaseMessage.includes('anxious'))) {
-      const question = getRandomElement(THERAPEUTIC_PROMPTS);
-      const response = `Alright, let's talk! 😊 ${question}`;
-      return res.json({ response });
+    // 4. Therapeutic Trigger (Re-commenting AGAIN for game debugging)
+     if (lowerCaseMessage.includes('feeling') && (lowerCaseMessage.includes('down') || lowerCaseMessage.includes('lost') || lowerCaseMessage.includes('anxious'))) {
+        // Temporarily commented out
+       const question = getRandomElement(THERAPEUTIC_PROMPTS);
+       const response = `Alright, let's talk! 😊 ${question}`;
+       return res.json({ response });
+       
+     }
+
+    // 5. NEW: Guess the Number Game Trigger
+    if (lowerCaseMessage.includes('play') && lowerCaseMessage.includes('guess the number')) {
+      console.log("[Backend] Guess the Number trigger matched for message:", message); // ADD LOG
+      // Send a specific response structure to signal game start
+      return res.json({
+        response: "Okay, let's play Guess the Number! 🤔 I've picked a number between 1 and 100. What's your first guess?",
+        startGame: 'guess_the_number' // Signal for the frontend
+      });
+    }
+
+    // NEW: Breathing Exercise Trigger - ADDING LOGS
+    const breathingKeywords = ['breathing exercise', 'help me relax', 'calm down', 'mindfulness moment'];
+    const isBreathingRequest = breathingKeywords.some(keyword => lowerCaseMessage.includes(keyword));
+
+    console.log(`[Backend] Checking for breathing exercise trigger. Match found: ${isBreathingRequest}`); // Log if match found
+
+    if (isBreathingRequest) {
+      // This block SHOULD execute if isBreathingRequest is true
+      console.log("[Backend] Breathing Exercise trigger MATCHED. Preparing exercise response."); // Confirm entry
+      return res.json({
+        response: "Okay, mate. Let's take a moment to just breathe together. It can really help sometimes. Follow my lead...", // Initial message
+        startBreathingExercise: true,
+        steps: BREATHING_EXERCISE_STEPS
+      });
+    } else {
+      console.log("[Backend] Breathing Exercise trigger DID NOT MATCH."); // Log if no match
     }
 
     // --- If no features triggered, proceed to Mistral ---
-
-    // console.log("[SadeAI] No feature triggered, calling Mistral..."); // Optional debug log
-
+    console.log("[Backend] No specific feature triggered. Proceeding to Mistral AI call."); // Log fallback
     const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -373,6 +424,12 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **Distress/Support:** If a user expresses sadness, stress, anxiety, feeling lost, confused, or generally down, respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural, like a caring friend listening. *Crucially, do NOT give medical, psychological, or clinical advice.* You can gently suggest simple, general well-being actions like taking a moment to breathe, having some tea, or journaling, *if it feels natural*. Let the user lead; focus on listening and being present. Responses can be slightly longer and more caring in these moments.
 *   **Casual Chat/Gist:** If a user is just chatting, keep responses shorter, lighter, and fun. Use more banter and slang.
 *   **Emojis:** Use relevant emojis occasionally to add warmth, but don't overdo it (1-2 per response max).
+
+**Guess the Number Game Guidelines:**
+*   **Game Start:** When the user starts the game, respond with the initial prompt and set the game state.
+*   **Game Logic:** If the user makes a valid guess, update the game state and provide feedback. If the guess is incorrect, provide a hint and update the game state.
+*   **Game End:** When the user guesses the number correctly, end the game and provide a congratulatory message.
+
 
 **Therapeutic Guidelines:**
 *   **Therapeutic Tone:** When responding to distressful messages, adopt a warm, empathetic, and supportive tone.
