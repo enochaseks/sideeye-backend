@@ -9,8 +9,6 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
-const OpenAI = require("openai");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const { createServer } = require('http');
 const { Server } = require('socket.io');
@@ -288,9 +286,12 @@ const WOULD_YOU_RATHER_QUESTIONS = [
 const THERAPEUTIC_PROMPTS = [
   "I'm feeling a bit down today",
   "Can we just talk?",
-  "Tell me a fact",
-  "What does 'wagwan' mean?",
-  "Play 'Would You Rather?'",
+  "I'm feeling anxious about my future",
+  "I'm worried about my relationship",
+  "I'm stressed about my job",
+  "I'm sad about my situation",
+  "I'm angry about something",
+  "I'm feeling a bit lost",
 ];
 
 
@@ -337,6 +338,13 @@ app.post('/api/sade-ai', async (req, res) => {
        const question = getRandomElement(WOULD_YOU_RATHER_QUESTIONS);
        const response = `Alright, game time! 😉 Would you rather: ${question}`;
        return res.json({ response });
+    }
+
+    // 4. Therapeutic Trigger
+    if (lowerCaseMessage.includes('feeling') && (lowerCaseMessage.includes('down') || lowerCaseMessage.includes('lost') || lowerCaseMessage.includes('anxious'))) {
+      const question = getRandomElement(THERAPEUTIC_PROMPTS);
+      const response = `Alright, let's talk! 😊 ${question}`;
+      return res.json({ response });
     }
 
     // --- If no features triggered, proceed to Mistral ---
