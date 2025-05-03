@@ -12,6 +12,7 @@ const dotenv = require('dotenv');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const { FieldValue } = require('firebase-admin/firestore');
 require('dotenv').config();
 
 const app = express();
@@ -99,6 +100,8 @@ try {
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET
   });
   console.log('Firebase Admin SDK initialized successfully');
+  // Get Firestore database instance
+  const db = admin.firestore(); 
 } catch (error) {
   console.error('Error initializing Firebase Admin SDK:', error);
   process.exit(1);
@@ -734,7 +737,29 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   // Handle joining room (from server.ts)
-  socket.on('join-room', (roomId, userId) => { // Remove TS type annotations
+  socket.on('join-room', async (roomId, userId) => { 
+    // Check if user is banned before allowing join
+    try { // Add try...catch for Firestore operation
+      const roomRef = db.collection('sideRooms').doc(roomId); // Use Admin SDK syntax
+      const roomDoc = await roomRef.get(); // Use .get()
+      if (roomDoc.exists) { // Use .exists (getter)
+        const roomData = roomDoc.data();
+        if (roomData.bannedUsers && roomData.bannedUsers.includes(userId)) {
+          console.log(`[Server] Denying join for banned user ${userId} in room ${roomId}`);
+          socket.emit('join-denied', { reason: 'banned' });
+          return; 
+        }
+      } else {
+        console.warn(`[Server] Room ${roomId} not found during join check.`);
+      }
+    } catch (error) {
+       console.error(`[Server] Error checking ban status for room ${roomId}:`, error);
+       // Decide if join should fail or proceed cautiously
+       // For now, let's prevent join on error to be safe
+       socket.emit('join-denied', { reason: 'server_error' }); 
+       return;
+    }
+
     console.log(`User ${userId} joining room ${roomId}`);
     socket.join(roomId);
 
@@ -795,6 +820,18 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- NEW: Handle Sound Effects --- 
+  socket.on('sound-effect', (data) => { // Assume data has { roomId, userId, soundUrl }
+    const { roomId, userId, soundUrl } = data;
+    if (roomId && userId && soundUrl) {
+      console.log(`User ${userId} triggered sound effect ${soundUrl} in room ${roomId}, broadcasting...`);
+      // Broadcast to everyone else in the room
+      socket.to(roomId).emit('sound-effect', data);
+    } else {
+      console.warn('Received malformed sound-effect data:', data);
+    }
+  });
+
   // Handle leaving room (from server.ts)
   socket.on('leave-room', (roomId, userId) => {
     handleUserLeaveRoom(socket, roomId, userId);
@@ -819,21 +856,161 @@ io.on('connection', (socket) => {
       }
     });
   });
+
+  // --- Handle Owner Moderation Events ---
+
+  // Mute/Unmute Target User
+  const handleMuteToggle = (eventName, data) => {
+    const { roomId, targetUserId } = data;
+    if (!roomId || !targetUserId) {
+      console.warn(`[Server] Malformed ${eventName} data:`, data);
+      return;
+    }
+    // Find the socket ID of the target user
+    const targetSocketId = userSockets.get(targetUserId); // Use the userSockets map
+    if (targetSocketId) {
+      console.log(`[Server] Relaying ${eventName} from owner (socket ${socket.id}) to target user ${targetUserId} (socket ${targetSocketId}) in room ${roomId}`);
+      // Emit directly to the specific target user's socket
+      io.to(targetSocketId).emit(eventName, roomId); // Send only the room ID or nothing if not needed by client
+    } else {
+      console.log(`[Server] Target user ${targetUserId} for ${eventName} not found or not connected.`);
+    }
+  };
+
+  socket.on('force-mute', (data) => {
+    handleMuteToggle('force-mute', data);
+  });
+
+  socket.on('force-unmute', (data) => {
+    handleMuteToggle('force-unmute', data);
+  });
+
+  // Ban Target User
+  socket.on('force-ban', async (data) => {
+    const { roomId, targetUserId } = data;
+    if (!roomId || !targetUserId) {
+      console.warn('[Server] Malformed force-ban data:', data);
+      return;
+    }
+    
+    // TODO: Add check to ensure the sender (socket.id) is the actual room owner
+    // This requires knowing the ownerId associated with the roomId
+
+    console.log(`[Server] Received force-ban request for user ${targetUserId} in room ${roomId} from owner ${socket.id}`);
+    
+    try {
+        // 1. Update Firestore - Add user to banned list
+        const roomRef = db.collection('sideRooms').doc(roomId); // Use Admin SDK syntax
+        await roomRef.update({ // Use .update()
+            bannedUsers: FieldValue.arrayUnion(targetUserId) // Use FieldValue.arrayUnion
+        });
+        console.log(`[Server] Added ${targetUserId} to bannedUsers for room ${roomId}`);
+
+        // 2. Trigger removal logic (same as force-remove)
+        const targetSocketId = userSockets.get(targetUserId);
+        if (targetSocketId) {
+            console.log(`[Server] Triggering removal actions for banned user ${targetUserId}`);
+            const targetSocket = io.sockets.sockets.get(targetSocketId);
+            if (targetSocket) {
+                io.to(targetSocketId).emit('force-remove', roomId); // Use existing remove event
+                targetSocket.leave(roomId);
+                targetSocket.disconnect(true); 
+                console.log(`[Server] Disconnected banned user socket ${targetSocketId}`);
+            }
+        } else {
+             console.log(`[Server] Banned user ${targetUserId} not currently connected.`);
+        }
+
+        // 3. Clean up server state
+        handleUserLeaveRoom(null, roomId, targetUserId);
+
+    } catch (error) {
+        console.error(`[Server] Error processing force-ban for ${targetUserId} in room ${roomId}:`, error);
+        // Optionally emit an error back to the owner
+        // socket.emit('action-failed', { action: 'ban', userId: targetUserId, error: 'Server error' });
+    }
+  });
+
+  // Remove Target User
+  socket.on('force-remove', (data) => {
+    const { roomId, targetUserId } = data;
+    if (!roomId || !targetUserId) {
+      console.warn('[Server] Malformed force-remove data:', data);
+      return;
+    }
+    console.log(`[Server] Received force-remove request for user ${targetUserId} in room ${roomId} from owner ${socket.id}`); // Log reception
+
+    const targetSocketId = userSockets.get(targetUserId);
+    console.log(`[Server] Looked up targetSocketId for ${targetUserId}: ${targetSocketId}`); // Log lookup result
+
+    if (targetSocketId) {
+      // Removed duplicate log from previous step
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+
+      if (targetSocket) {
+        console.log(`[Server] Found target socket object for ${targetSocketId}`); // Log socket found
+        // 1. Tell the target user they are being removed
+        console.log(`[Server] Emitting 'force-remove' to target socket ${targetSocketId}`);
+        io.to(targetSocketId).emit('force-remove', roomId);
+        // 2. Make the target socket leave the Socket.IO room
+        console.log(`[Server] Making socket ${targetSocketId} leave room ${roomId}`);
+        targetSocket.leave(roomId);
+        // 3. Force disconnect the target user's socket
+        console.log(`[Server] Disconnecting socket ${targetSocketId}`);
+        targetSocket.disconnect(true); // true = close underlying connection
+        console.log(`[Server] Force disconnected socket ${targetSocketId} (disconnect call returned)`); // Log after disconnect call
+      } else {
+        console.log(`[Server] Target socket object NOT found for ID ${targetSocketId}. User might have already disconnected.`);
+      }
+      // 4. Clean up server state (pass null for socket context)
+      console.log(`[Server] Calling handleUserLeaveRoom for ${targetUserId} (triggered by force-remove)`);
+      handleUserLeaveRoom(null, roomId, targetUserId);
+    } else {
+      console.log(`[Server] Target user ${targetUserId} for force-remove not found or not connected in userSockets map.`);
+      // Optional: Still try to clean up server state if user is in room map but socket is missing
+      console.log(`[Server] Calling handleUserLeaveRoom anyway for ${targetUserId} (user not found in sockets)`);
+      handleUserLeaveRoom(null, roomId, targetUserId);
+    }
+  });
 });
 
-// Helper function from server.ts (translated to JS)
-function handleUserLeaveRoom(socket, roomId, userId) { // Remove TS types
-  console.log(`User ${userId} leaving room ${roomId}`);
-  socket.leave(roomId);
+// Helper function - Refined for robustness
+function handleUserLeaveRoom(callingSocket, roomId, userId) { // socket can be the leaving socket OR null if called internally
+  console.log(`[handleUserLeaveRoom] Cleaning up for user ${userId} in room ${roomId}. Triggered by socket: ${callingSocket?.id || 'Internal/Null'}`);
+  
+  let userExistedInRoom = false;
   const room = rooms.get(roomId);
+
   if (room) {
-    room.delete(userId);
+    console.log(`[handleUserLeaveRoom] Room ${roomId} found. Current members before delete:`, Array.from(room));
+    userExistedInRoom = room.delete(userId); // Attempt to remove from room set
+    console.log(`[handleUserLeaveRoom] User ${userId} ${userExistedInRoom ? 'deleted from' : 'not found in'} room map for ${roomId}. Members after delete:`, Array.from(room));
+
+    // Broadcast user-left *only if user was successfully removed from the room map*
+    // Do this before potentially deleting the room itself
+    if (userExistedInRoom) {
+      console.log(`[handleUserLeaveRoom] Broadcasting 'user-left' event for ${userId} to room ${roomId}.`);
+      // IMPORTANT: Use io.to(roomId) to broadcast to all sockets currently in the room
+      io.to(roomId).emit('user-left', userId); 
+    } else {
+      console.log(`[handleUserLeaveRoom] Skipping 'user-left' broadcast for ${userId} as they were not found/removed from the room map.`);
+    }
+
+    // Check if room is now empty and delete if necessary
     if (room.size === 0) {
+      console.log(`[handleUserLeaveRoom] Room ${roomId} is now empty, deleting room from 'rooms' map.`);
       rooms.delete(roomId);
     }
+  } else {
+    console.log(`[handleUserLeaveRoom] Room ${roomId} not found in 'rooms' map. Cannot broadcast user-left.`);
+    userExistedInRoom = false; // Ensure flag is false if room didn't exist
   }
-  userSockets.delete(userId); // Remove user from the socket map
-  socket.to(roomId).emit('user-left', userId); // Notify others
+
+  // Always attempt to remove from userSockets map
+  const userExistedInSockets = userSockets.delete(userId); 
+  console.log(`[handleUserLeaveRoom] User ${userId} ${userExistedInSockets ? 'deleted from' : 'not found in'} userSockets map.`);
+
+  // Note: The 'user-left' broadcast now happens earlier, only if the user was confirmed to be in the room set.
 }
 
 // Start server
