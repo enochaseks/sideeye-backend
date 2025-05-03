@@ -396,6 +396,128 @@ async function performWebSearch(query) {
   }
 }
 
+// --- Connect 4 Game Data ---
+const CONNECT4_ROWS = 6;
+const CONNECT4_COLS = 7;
+const PLAYER_USER = '🔴'; // User uses Red
+const PLAYER_AI = '🟡';   // Sade uses Yellow
+const EMPTY_SLOT = '⚪'; // Empty slot
+
+// In-memory storage for active Connect 4 games
+// Map<userId, { board: string[][], turn: 'User' | 'AI', gameOver: boolean, winner: 'User' | 'AI' | 'Draw' | null }>
+const connect4Games = new Map();
+
+// Creates a new empty Connect 4 board
+function createConnect4Board() {
+  const board = [];
+  for (let r = 0; r < CONNECT4_ROWS; r++) {
+    board[r] = [];
+    for (let c = 0; c < CONNECT4_COLS; c++) {
+      board[r][c] = EMPTY_SLOT;
+    }
+  }
+  return board;
+}
+
+// --- Connect 4 Game Helpers ---
+
+// Checks if a column has space for a move
+function isValidMove(board, col) {
+  // Check if col is within bounds (0-indexed) and the top row in that column is empty
+  return col >= 0 && col < CONNECT4_COLS && board[0][col] === EMPTY_SLOT;
+}
+
+// Places a player's piece in the lowest available row of a column
+// Returns the row index where the piece was placed, or -1 if column is full
+function makeMove(board, col, player) {
+  for (let r = CONNECT4_ROWS - 1; r >= 0; r--) {
+    if (board[r][col] === EMPTY_SLOT) {
+      board[r][col] = player;
+      return r; // Return the row where the piece landed
+    }
+  }
+  return -1; // Should not happen if isValidMove was checked first, but good safeguard
+}
+
+// Checks if the last move resulted in a win
+function checkForWin(board, player) {
+    // Check horizontal, vertical, and both diagonals
+
+    // Horizontal check
+    for (let r = 0; r < CONNECT4_ROWS; r++) {
+        for (let c = 0; c <= CONNECT4_COLS - 4; c++) {
+            if (board[r][c] === player && board[r][c+1] === player && board[r][c+2] === player && board[r][c+3] === player) {
+                return true;
+            }
+        }
+    }
+
+    // Vertical check
+    for (let r = 0; r <= CONNECT4_ROWS - 4; r++) {
+        for (let c = 0; c < CONNECT4_COLS; c++) {
+            if (board[r][c] === player && board[r+1][c] === player && board[r+2][c] === player && board[r+3][c] === player) {
+                return true;
+            }
+        }
+    }
+
+    // Positive diagonal (\) check
+    for (let r = 0; r <= CONNECT4_ROWS - 4; r++) {
+        for (let c = 0; c <= CONNECT4_COLS - 4; c++) {
+            if (board[r][c] === player && board[r+1][c+1] === player && board[r+2][c+2] === player && board[r+3][c+3] === player) {
+                return true;
+            }
+        }
+    }
+
+    // Negative diagonal (/) check
+    for (let r = 3; r < CONNECT4_ROWS; r++) {
+        for (let c = 0; c <= CONNECT4_COLS - 4; c++) {
+            if (board[r][c] === player && board[r-1][c+1] === player && board[r-2][c+2] === player && board[r-3][c+3] === player) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// Checks if the board is full (draw condition)
+function checkForDraw(board) {
+  // Check if the top row is full
+  for (let c = 0; c < CONNECT4_COLS; c++) {
+    if (board[0][c] === EMPTY_SLOT) {
+      return false; // Found an empty slot, not a draw
+    }
+  }
+  return true; // Top row is full, it's a draw
+}
+
+// Simple AI: finds the first valid column to play in
+// TODO: Make this smarter later!
+function getAIMove(board) {
+    const validMoves = [];
+    for (let c = 0; c < CONNECT4_COLS; c++) {
+        if (isValidMove(board, c)) {
+            validMoves.push(c);
+        }
+    }
+    // Pick a random valid move if available
+    if (validMoves.length > 0) {
+        return validMoves[Math.floor(Math.random() * validMoves.length)];
+    }
+    return -1; // No valid moves (should only happen in a draw, handled by checkForDraw)
+}
+
+// Formats the board into a string for display in chat
+function formatBoardToString(board) {
+    let boardString = " 1  2  3  4  5  6  7\n"; // Column numbers
+    boardString += board.map(row => row.join('')).join('\n');
+    return boardString;
+}
+
+// --- End Connect 4 Game Helpers ---
+
 // Sade AI endpoint (NO NEED for app.options here again, handled above)
 app.post('/api/sade-ai', async (req, res) => {
   console.log("--- Sade AI Handler Entered ---");
@@ -520,9 +642,177 @@ app.post('/api/sade-ai', async (req, res) => {
 
     // --- Feature Checks (Only run if no hardcoded response sent) ---
     console.log(`[SadeAI] Checking features... searchPerformed=${searchPerformed}, responseSent=${responseSent}`); // This log might be less useful now
-    if (!searchPerformed && !responseSent) { 
+    if (!searchPerformed && !responseSent) {
+        // --- NEW: Connect 4 Game Start ---
+        if ((lowerCaseMessage.includes('play') && (lowerCaseMessage.includes('connect 4') || lowerCaseMessage.includes('connect four'))) ||
+            (lowerCaseMessage.includes('start') && (lowerCaseMessage.includes('connect 4') || lowerCaseMessage.includes('connect four'))))
+        {
+             console.log(`[SadeAI] Connect 4 game request detected for user ${userId}.`);
+             // Check if a game is already active for this user
+             if (connect4Games.has(userId)) {
+                 // TODO: Handle resuming an existing game or confirming restart later
+                 const existingGame = connect4Games.get(userId);
+                 if (!existingGame.gameOver) {
+                    console.log(`[SadeAI] Connect 4 game already active for user ${userId}.`);
+                    // For now, just remind them a game is in progress.
+                    // We'll add board formatting later.
+                    res.json({
+                        response: "Looks like we're already playing Connect 4, mate! It's your turn. What column (1-7)?"
+                        // TODO: Add board state to response later
+                    });
+                    responseSent = true;
+                 } else {
+                     // Game was over, start a new one
+                     console.log(`[SadeAI] Previous game for ${userId} was over. Starting new Connect 4 game.`);
+                     connect4Games.delete(userId); // Clear old game
+                 }
+             }
+
+             // If no game was active OR the previous one was finished
+             if (!responseSent) {
+                 const newBoard = createConnect4Board();
+                 const newGame = {
+                    board: newBoard,
+                    turn: 'User', // User goes first
+                    gameOver: false,
+                    winner: null
+                 };
+                 connect4Games.set(userId, newGame);
+                 console.log(`[SadeAI] Started new Connect 4 game for user ${userId}.`);
+
+                 // Format the board for the response message
+                 let boardString = "Alright, Connect 4 it is! You're Red (🔴), I'm Yellow (🟡). You go first.\n\n";
+                 boardString += " 1  2  3  4  5  6  7\n"; // Column numbers
+                 boardString += newBoard.map(row => row.join('')).join('\n');
+                 boardString += "\n\nYour move! Pick a column (1-7).";
+
+                 res.json({
+                     response: boardString,
+                     startGame: 'connect_4', // Add a flag for the frontend
+                     board: newBoard // Send initial board state
+                 });
+                 responseSent = true;
+            }
+        }
+        // --- END: Connect 4 Game Start ---
+
+        // --- Connect 4 Move Handling ---
+        else if (message.startsWith('connect4_move_')) {
+            console.log(`[SadeAI] Connect 4 move received from user ${userId}: ${message}`);
+            const game = connect4Games.get(userId);
+
+            if (!game) {
+                console.log(`[SadeAI] Connect 4 move received, but no active game found for user ${userId}.`);
+                res.json({ error: "Hmm, we don't seem to be playing Connect 4 right now. Ask me to play!" });
+                responseSent = true;
+            } else if (game.gameOver) {
+                console.log(`[SadeAI] Connect 4 move received, but the game is already over for user ${userId}.`);
+                res.json({ error: "Looks like that game's finished, mate! Ask me to play again if you fancy another round." });
+                responseSent = true;
+            } else if (game.turn !== 'User') {
+                console.log(`[SadeAI] Connect 4 move received, but it's not the user's turn for user ${userId}.`);
+                res.json({ error: "Hold your horses! It's my turn right now. 😉" });
+                responseSent = true;
+            } else {
+                // Extract column number (adjust for 0-based index)
+                const col = parseInt(message.split('_')[2], 10) - 1;
+
+                if (!isValidMove(game.board, col)) {
+                    console.log(`[SadeAI] Invalid move (column ${col + 1}) received for user ${userId}.`);
+                    res.json({ error: `Oops! Column ${col + 1} is full or invalid. Try another column (1-7).` });
+                    // Don't change turn or update board state
+                    responseSent = true;
+                } else {
+                    // --- User's Move ---
+                    makeMove(game.board, col, PLAYER_USER);
+                    console.log(`[SadeAI] User ${userId} placed piece in column ${col + 1}.`);
+
+                    // Check for user win
+                    if (checkForWin(game.board, PLAYER_USER)) {
+                        game.gameOver = true;
+                        game.winner = 'User';
+                        connect4Games.set(userId, game); // Update game state
+                        console.log(`[SadeAI] User ${userId} won the game.`);
+                        res.json({
+                            gameUpdate: 'connect_4',
+                            response: `Yes! You got it! Proper smart move. You win! 🎉\n\n${formatBoardToString(game.board)}\n\nWant to play again?`,
+                            board: game.board,
+                            turn: game.turn,
+                            gameOver: game.gameOver,
+                            winner: game.winner
+                        });
+                        responseSent = true;
+                    }
+                    // Check for draw (after user move)
+                    else if (checkForDraw(game.board)) {
+                        game.gameOver = true;
+                        game.winner = 'Draw';
+                        connect4Games.set(userId, game); // Update game state
+                        console.log(`[SadeAI] Game ended in a draw for user ${userId}.`);
+                        res.json({
+                            gameUpdate: 'connect_4',
+                            response: `Phew! Looks like it's a draw! Good game, mate! 🤝\n\n${formatBoardToString(game.board)}\n\nWant to play again?`,
+                            board: game.board,
+                            turn: game.turn,
+                            gameOver: game.gameOver,
+                            winner: game.winner
+                        });
+                        responseSent = true;
+                    } else {
+                         // --- AI's Turn (if game not over) ---
+                         game.turn = 'AI';
+                         const aiCol = getAIMove(game.board);
+                         let aiResponse = "";
+
+                         if (aiCol !== -1) { // Should always be valid unless board is full (draw)
+                             makeMove(game.board, aiCol, PLAYER_AI);
+                             console.log(`[SadeAI] AI placed piece in column ${aiCol + 1} for game with user ${userId}.`);
+                             aiResponse = `Okay, I've put my piece in column ${aiCol + 1}. 🤔\n\n${formatBoardToString(game.board)}\n\nYour turn! Pick a column (1-7).`;
+
+                             // Check for AI win
+                             if (checkForWin(game.board, PLAYER_AI)) {
+                                 game.gameOver = true;
+                                 game.winner = 'AI';
+                                 aiResponse = `Haha! Gotcha! Looks like I win this time! 😉\n\n${formatBoardToString(game.board)}\n\nFancy another go?`;
+                                 console.log(`[SadeAI] AI won the game against user ${userId}.`);
+                             }
+                             // Check for draw (after AI move)
+                             else if (checkForDraw(game.board)) {
+                                 game.gameOver = true;
+                                 game.winner = 'Draw';
+                                 aiResponse = `Blimey, it's a draw! Well played! 🤝\n\n${formatBoardToString(game.board)}\n\nWant to play again?`;
+                                 console.log(`[SadeAI] Game ended in a draw after AI move for user ${userId}.`);
+                             } else {
+                                 // Game continues, switch turn back to User
+                                 game.turn = 'User';
+                             }
+                         } else {
+                             // This case should ideally not be reached if draw is checked correctly
+                             console.error(`[SadeAI] Error: AI could not find a valid move, but game was not detected as draw. User: ${userId}`);
+                             aiResponse = "Uh oh, something's gone a bit wonky. Let's call that a draw for now.";
+                             game.gameOver = true;
+                             game.winner = 'Draw';
+                         }
+
+                         connect4Games.set(userId, game); // Update game state
+                         res.json({
+                             gameUpdate: 'connect_4',
+                             response: aiResponse,
+                             board: game.board,
+                             turn: game.turn,
+                             gameOver: game.gameOver,
+                             winner: game.winner
+                         });
+                         responseSent = true;
+                         // --- End AI's Turn ---
+                     }
+                }
+            }
+        }
+        // --- END: Connect 4 Move Handling ---
+
         // 1. Slang Explainer (Check specifically for "what does X mean" type patterns)
-        if (lowerCaseMessage.match(/^(what does|what is|explain)\\s+['"]?(.+?)['"]?\\??(?:\\s+mean)?$/)) {
+        else if (lowerCaseMessage.match(/^(what does|what is|explain)\\s+['"]?(.+?)['"]?\\??(?:\\s+mean)?$/)) {
              const slangMatch = lowerCaseMessage.match(/^(what does|what is|explain)\\s+['"]?(.+?)['"]?\\??(?:\\s+mean)?$/);
              const term = slangMatch[2].trim(); // Non-null assertion ok due to outer check
              const explanation = SLANG_EXPLANATIONS[term];
