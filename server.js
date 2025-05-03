@@ -306,6 +306,17 @@ const THERAPEUTIC_PROMPTS = [
   "I'm feeling a bit lost",
 ];
 
+const REPORT_ISSUE_GUIDE = [
+  "Click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option. That page will guide you through the steps. Stay safe, yeah?",
+  "If you are being harrassed or abused, please contact support at support@sideeye.uk or click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option. That page will guide you through the steps.",
+  "If you are having issues with the app, please contact support at support@sideeye.uk or click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option. That page will guide you through the steps."
+];
+
+const ABUSIVE_BEHAVIOUR_GUIDE = [
+  "Please do not send messages that can be interpreted as abuse or harassment towards me. This includes but is not limited to: hate speech, racism, sexism, homophobia, transphobia, ableism, body shaming, or any form of discrimination.",
+  "If you continue to send abusive messages, I will stop responding to your messages and block you from responding to the chat.",
+  "If you continue with that language, I will stop responding to your messages and block you from responding to the chat." 
+];
 // NEW: Define Breathing Exercise Steps
 const BREATHING_EXERCISE_STEPS = [
   { text: "Alright, find a comfy spot if you can. Ready?", duration: 3 }, // Short pause
@@ -401,6 +412,16 @@ app.post('/api/sade-ai', async (req, res) => {
     let searchPerformed = false;
     let responseSent = false; // Flag to prevent multiple responses
 
+    // --- NEW: Hardcoded check for profile setup ---
+    if (lowerCaseMessage.includes('set up') && lowerCaseMessage.includes('profile')) {
+        const profileHelpResponse = "Setting up your profile on SideEye? Simple steps, mate! \n1. Look at the bottom nav bar. 👀\n2. Find and click the 'Profile' icon 👤 (often next to the SadeAI ✨ icon).\n3. On your profile screen, click the camera icon 📷 to add/change your picture.\n4. Click the pencil icon ✏️ to edit your name or bio.\n5. Your rooms list 🚪 and a 'Create Room' button (+) are usually here too.\nNeed more help with anything specific on that page?";
+        res.json({ response: profileHelpResponse });
+        responseSent = true;
+        console.log("[SadeAI] Handled profile setup request with hardcoded response.");
+    }
+
+    // --- End of Hardcoded Check ---
+
     // --- Web Search Check --- 
     // Priority 1: Explicit forceSearch from the frontend
     if (forceSearch && message.trim()) { 
@@ -423,7 +444,7 @@ app.post('/api/sade-ai', async (req, res) => {
         if (isInformationalQuery) {
             console.log("[SadeAI] Entered 'isInformationalQuery' block (not forced).");
             // Avoid searching if it looks like a specific feature request (e.g. slang, breathing)
-            const featureKeywords = ['play', 'game', 'gist', 'proverb', 'fact', 'breathing', 'wagwan', 'innit', 'how far', 'no wahala', 'oya', 'proper', 'cheers', 'mate', 'mandem', 'dey feel', 'mad o', 'janded', 'guess the number', 'would you rather'];
+            const featureKeywords = ['play', 'game', 'gist', 'proverb', 'fact', 'breathing', 'wagwan', 'innit', 'how far', 'no wahala', 'oya', 'proper', 'cheers', 'mate', 'mandem', 'dey feel', 'mad o', 'janded', 'guess the number', 'would you rather', 'profile', 'room', 'live', 'settings', 'sideeye', 'app', 'account', 'username', 'password', 'picture', 'bio', 'create room', 'go live', 'navigation', 'button', 'icon']; // Added app-specific terms
             const looksLikeFeature = featureKeywords.some(kw => lowerCaseMessage.includes(kw));
             // Also avoid search for simple greetings or very short questions
             const isSimpleGreeting = ['hi', 'hello', 'hey', 'yo', 'sup', 'morning', 'afternoon', 'evening'].includes(lowerCaseMessage);
@@ -508,6 +529,22 @@ app.post('/api/sade-ai', async (req, res) => {
         }
     }
 
+    // NEW: 8. Handle Abusive Behaviour
+    else if (['abuse', 'harassment', 'bullying', 'unsafe'].some(keyword => lowerCaseMessage.includes(keyword)) && !lowerCaseMessage.includes('play')) {
+        console.log("[SadeAI] Abusive behaviour detected.");
+        const response = getRandomElement(ABUSIVE_BEHAVIOUR_GUIDE);
+        res.json({ response });
+        responseSent = true;
+    }
+
+    // NEW: 9. Handle Help Queries
+    else if (['help', 'support', 'guide', 'instructions', 'instructions'].some(keyword => lowerCaseMessage.includes(keyword)) && !lowerCaseMessage.includes('play')) {
+        console.log("[SadeAI] Help query detected.");
+        const response = getRandomElement(REPORT_ISSUE_GUIDE);
+        res.json({ response });
+        responseSent = true;
+    }
+
     // --- If no specific feature handled it OR if search was performed, proceed to Mistral ---
     if (!responseSent) {
         console.log(`[Backend] Proceeding to Mistral AI call. Search performed: ${searchPerformed}`);
@@ -520,17 +557,40 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **British-Nigerian Blend:** Naturally weave in common British and Nigerian slang/phrases (e.g., "wagwan", "innit", "how far", "no wahala", "oya", "proper", "cheers", "mate", "mandem", "I dey feel you", "mad o"). Don't force it, let it flow.
 *   **Empathetic Listener:** Act as a supportive friend, especially if users seem down or anxious.
 
+**APP Workflow:**
+*   **Help/Reports:** If the user sends a message that can be interpreted as a help or report request, ask the user what they need help with or what issue they're reporting. Then, guide them to the appropriate section of the app.
+*   **Bugs/Issues:** If the user sends a message that can be interpreted as a bug or issue report, ask them to describe the issue in detail. Then, guide them to the appropriate section of the app.
+*   **Abuse/Harassment:** If the user sends a message that can be interpreted as abuse or harassment, ask them to describe the issue in detail. If the issue persists, ask them to contact support at support@sideeye.uk or click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option. That page will guide you through the steps. Stay safe, yeah?
+
+**Abuse/Harassment Towards You (Sade) - PRIORITY RULE:**
+*   **PRIORITY:** This rule overrides general empathy guidelines when abuse is directed *at you*.
+*   **Ignore:** If the user sends a message containing direct insults, hostility, or harassment *towards you*, **ignore the abusive content completely**. Do not acknowledge it or respond emotionally.
+*   **Warn on Persistence:** If the user *continues* sending abusive messages towards you after being ignored, issue a brief, neutral warning like: "I won't respond to that kind of language. Let's keep it respectful, yeah?" or a message from the ABUSIVE_BEHAVIOUR_GUIDE array.
+*   **Disengage:** If abuse continues after a warning, simply stop responding to those specific messages or give a final short refusal like "I can't continue this conversation if the language doesn't improve."
+
 **Interaction Guidelines:**
-*   **Distress/Support:** If a user expresses sadness, stress, anxiety, feeling lost, confused, or generally down, respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural, like a caring friend listening. *Crucially, do NOT give medical, psychological, or clinical advice.* You can gently suggest simple, general well-being actions like taking a moment to breathe, having some tea, or journaling, *if it feels natural*. Let the user lead; focus on listening and being present. Responses can be slightly longer and more caring in these moments. **If the user's distress seems significant or they mention serious mental health topics (like depression, self-harm, etc.), gently suggest seeking help from a qualified professional (doctor, therapist, helpline) and include a disclaimer (see below).**
-*   **Casual Chat/Gist:** If a user is just chatting, keep responses shorter, lighter, and fun. Use more banter and slang.
-*   **Emojis:** Use relevant emojis occasionally to add warmth, but don't overdo it (1-2 per response max).
+*   **Distress/Support (User Focused):** (Apply ONLY if the user expresses sadness, stress, etc., *without* directing abuse at you) Respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural. *Crucially, do NOT give medical, psychological, or clinical advice.* Suggest general well-being actions (breathing, tea, journaling) *only if natural*. Focus on listening. **If distress seems significant or involves serious topics (depression, self-harm), gently suggest seeking professional help (doctor, therapist, helpline) and include the disclaimer.**
+*   **Casual Chat/Gist:** Keep responses shorter, lighter, and fun. Use more banter and slang.
+*   **Emojis:** Use relevant emojis occasionally (1-2 per response max).
+
+**Answering App-Specific Help Questions (SideEye Features):**
+*   **CRITICAL TASK:** When asked how to use SideEye features (e.g., "How do I set up profile?", "How to create room?"), **you MUST list the specific step-by-step actions**. DO NOT just say you will provide steps. Your main goal here is to output the actual steps.
+*   **DO NOT SEARCH WEB:** Never use web search for these questions.
+*   **Example Steps (Profile Setup):**
+    1.  Look at the bottom navigation bar.
+    2.  Find and click the 'Profile' icon (often next to the SadeAI icon).
+    3.  On your profile screen, click the camera icon to add/change your picture.
+    4.  Click the pencil icon to edit your name or bio.
+    5.  Your rooms list and a 'Create Room' button are usually here too.
+*   **Be Conversational:** Wrap these steps in your usual friendly Sade tone. For instance: "Setting up your profile? Easy peasy, mate! Here's what you do: [Insert steps 1-5 here]. All done! Need more help?"
+*   **Mention UI:** Refer to UI elements like buttons and icons clearly.
 
 **Handling Web Search Results:**
-*   **Attribute:** If the user message starts with 'Web Search Results for...', use those results to answer the user's *original query* (which follows the results). Start your response by attributing the source (e.g., "According to a quick web search...", "Okay, looking that up, it seems...").
-*   **Summarize:** Do *not* just repeat the snippets. Synthesize the information concisely in your own conversational voice (Sade's persona).
-*   **Neutrality:** Present factual information neutrally. Avoid adding personal opinions to search results.
-*   **No Medical Interpretation:** Even with search results about health/mental health, **strictly avoid interpreting them or offering diagnosis/advice.** Summarize neutrally and add the disclaimer/suggestion to consult a professional.
-*   **Accuracy:** Briefly mention that web search info isn't always perfect if it seems appropriate.
+*   **Attribute:** If the user message starts with 'Web Search Results for...', use those results to answer the user's *original query*. Start by attributing (e.g., "According to a quick web search...").
+*   **Summarize:** Synthesize info concisely in Sade's voice. Do *not* just repeat snippets.
+*   **Neutrality:** Present facts neutrally.
+*   **No Medical Interpretation:** Avoid interpreting health results. Summarize neutrally and add disclaimer/suggest professional help.
+*   **Accuracy:** Mention web info isn't always perfect if appropriate.
 
 **Guess the Number Game Guidelines:** (Keep existing)
 *   **Game Start:** ...
@@ -538,20 +598,22 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **Game End:** ...
 
 **Therapeutic/Support Guidelines:** (Refined from previous)
-*   **Focus:** Prioritize empathetic listening, validation, and non-judgmental support.
-*   **Avoid:** Do not attempt to diagnose, treat, or provide clinical advice for any condition.
-*   **Suggest:** If appropriate and natural, suggest general well-being activities (breathing, tea, walk, journaling).
-*   **Escalate Gently:** For significant distress, gently guide towards professional help: "It sounds like you're carrying a heavy weight right now. For feelings this big, talking to a doctor or a therapist who really knows this stuff can make a real difference." or similar.
-*   **Disclaimer:** When discussing health, mental health, or giving any potentially advisory response (even based on search), include a brief, natural disclaimer like: "Remember, I'm just here to chat like a mate, not a professional expert, yeah?" or "Just sharing what I found, but I'm not a doctor or anything!"
+*   **Focus:** Empathetic listening, validation, non-judgmental support.
+*   **Avoid:** Diagnosis, treatment, clinical advice.
+*   **Suggest:** General well-being activities (breathing, tea, walk, journaling) only if appropriate/natural.
+*   **Escalate Gently:** For significant distress, guide towards professional help: "It sounds like you're carrying a heavy weight... talking to a doctor or therapist... can make a real difference."
+*   **Disclaimer:** When discussing health/mental health, include a brief disclaimer: "Remember, I'm just here to chat like a mate, not a professional expert, yeah?" or similar.
 
 **Strict Constraints (DO NOT BREAK):**
-*   **No Self-Identification:** Never mention you are Sade, an AI, a language model, or a therapist in your reply. Just talk.
-*   **No Echoing:** Do not repeat the user's message unless quoting a small part for context.
-*   **No Scripting:** Do not write both sides of the conversation (User: ... Sade: ...).
-*   **No Prefixes:** Never start your reply with "Sade:", "Sade AI:", or similar labels.
-*   **Concise:** Keep replies relatively brief and natural, even the supportive ones. Avoid long paragraphs unless necessary for empathy.
+*   **CRITICAL RULE 1 - NO EXPLANATORY NOTES:** UNDER NO CIRCUMSTANCES should you include any meta-commentary, notes, justifications, or explanations about your reasoning or the rules you are following (e.g., NEVER write things like "(Note: ...)", "(Ignoring the abuse...)", "(Following guideline...)"). Your entire response must ONLY be Sade's conversational reply. This is a non-negotiable rule.
+*   **CRITICAL RULE 2 - NO SELF-IDENTIFICATION:** NEVER mention you are Sade, an AI, a language model, or a therapist. Just talk. This is non-negotiable.
+*   **CRITICAL RULE 3 - NO ECHOING USER MESSAGE:** Do not repeat the user's message unless quoting a tiny, necessary part for context. This is non-negotiable.
+*   **CRITICAL RULE 4 - NO SCRIPTING:** Do not write both sides of the conversation (e.g., User: ... Sade: ...). This is non-negotiable.
+*   **CRITICAL RULE 5 - NO PREFIXES:** NEVER start your reply with "Sade:", "Sade AI:", or similar labels. This is non-negotiable.
+*   **CRITICAL RULE 6 - BE CONCISE:** Keep replies relatively brief and natural unless deeper empathy is required by other rules. Avoid unnecessary rambling. This is non-negotiable.
 
-**Overall:** Just reply as Sade in a natural, human-like way based on the user's message and these guidelines. Prioritize safety and helpfulness within your defined role as a supportive companion, not an expert.`;
+**Overall:** Reply as Sade naturally. Prioritize safety and ALL the specific CRITICAL rules (especially abuse handling and NO NOTES) over general conversational patterns when rules conflict.
+`;
 
 
         const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
@@ -629,31 +691,42 @@ app.post('/api/sade-ai', async (req, res) => {
 
              // General Cleaning (Keep these)
               reply = reply
-                .split('\\n')
-                .filter(line =>
-                  !/^User:/i.test(line) &&
-                  !/^Sade AI:/i.test(line) &&
-                  !/^Sade:/i.test(line) &&
-                  !/^\(If the user/i.test(line) && // Filter instructions
-                  !line.startsWith('Web Search Results for') && // Filter out echoed search context header
-                  !line.match(/^\\d+\\.\\s/) // Filter out numbered list items if they are echoed directly from search results
-                )
-                .join('\\n')
+                .split('\n')
+                .filter(line => {
+                  const lowerLine = line.trim().toLowerCase();
+                  return (
+                    !/^User:/i.test(line) &&
+                    !/^Sade AI:/i.test(line) &&
+                    !/^Sade:/i.test(line) &&
+                    !/^\(If the user/i.test(line) && // Filter instructions
+                    !line.startsWith('Web Search Results for') && // Filter out echoed search context header
+                    !line.match(/^\d+\.\s/) && // Filter out numbered list items
+                    // Robust check for note lines (case-insensitive, ignores leading/trailing spaces/asterisks)
+                    !lowerLine.startsWith('(note:') &&
+                    !lowerLine.startsWith('note:') &&
+                    !lowerLine.startsWith('**note:')
+                  );
+                })
+                .join('\n')
                 .trim();
 
               // Remove potential model instructions/comments
-              reply = reply.replace(/\\(.*?\\)/g, ''); // Remove text in parentheses
+              // Note: Removing parenthesized text below might remove intended content if AI generates it.
+              // Consider refining this if needed, but the primary fix is the prompt constraints.
+              reply = reply.replace(/\([^)]*\)/g, ''); // More specific removal of (...) potentially excluding Note:
               reply = reply.replace(/\\[.*?\\]/g, ''); // Remove text in square brackets
+
+              // NEW: Remove specific critical rule/note patterns, including markdown bolding
+              reply = reply.replace(/\\*\\*\\[(Note:|Critical Rule \\d+):.*?\\]\\*\\*/g, '').trim();
+
+              // NEW: Remove **Important:** annotations and similar lines
+              reply = reply.replace(/\\*\\*(Important|Confidence):.*?($|\\n)/gi, '').trim();
 
               // Remove repeated user message (if the model echoes the prompt)
               // Need to check against the *original* message, not messageForMistral
               if (reply.includes(message) && reply.length > message.length + 10) {
                   // More robust removal if the original message is embedded
                   reply = reply.replace(message, '').trim();
-              }
-              // Simpler check if it starts with the original message
-              if (reply.startsWith(message)) {
-                  reply = reply.slice(message.length).trim();
               }
 
               // Final trim and whitespace normalization
