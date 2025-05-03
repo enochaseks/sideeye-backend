@@ -81,6 +81,8 @@ app.get('/api/cors-test', (req, res) => {
 
 // Initialize Firebase Admin
 let serviceAccount;
+let db; // Declare db variable here, outside the try block
+
 try {
   if (process.env.NODE_ENV === 'production') {
     if (!process.env.SERVICE_ACCOUNT_KEY) {
@@ -100,8 +102,8 @@ try {
     storageBucket: process.env.FIREBASE_STORAGE_BUCKET
   });
   console.log('Firebase Admin SDK initialized successfully');
-  // Get Firestore database instance
-  const db = admin.firestore(); 
+  // Get Firestore database instance and assign it
+  db = admin.firestore(); 
 } catch (error) {
   console.error('Error initializing Firebase Admin SDK:', error);
   process.exit(1);
@@ -398,43 +400,89 @@ async function performWebSearch(query) {
 app.post('/api/sade-ai', async (req, res) => {
   console.log("--- Sade AI Handler Entered ---");
   try {
-    // Extract message AND forceSearch flag from request body
-    const { message, forceSearch = false } = req.body; // Default forceSearch to false
-    console.log(`[SadeAI] Received message: "${message}", forceSearch: ${forceSearch}`); // Log both
+    // Extract message, forceSearch flag, and userId from request body
+    // We no longer primarily rely on history from the client, will fetch from DB
+    const { message, forceSearch = false, userId } = req.body;
+    console.log(`[SadeAI] Received message: "${message}", forceSearch: ${forceSearch}, userId: ${userId}`);
 
     if (!message) {
       console.log("[SadeAI] Error: Message is required.");
       return res.status(400).json({ error: "Message is required" });
     }
+    if (!userId) {
+      console.log("[SadeAI] Error: User ID is required for history.");
+      // Decide how to handle - maybe respond without history or return error
+      return res.status(400).json({ error: "User identification failed." });
+    }
 
-    const lowerCaseMessage = message.toLowerCase();
-    let messageForMistral = message; // Default to original message
     let searchPerformed = false;
     let responseSent = false; // Flag to prevent multiple responses
 
-    // --- NEW: Hardcoded check for profile setup ---
-    if (lowerCaseMessage.includes('set up') && lowerCaseMessage.includes('profile')) {
-        const profileHelpResponse = "Setting up your profile on SideEye? Simple steps, mate! \n1. Look at the bottom nav bar. 👀\n2. Find and click the 'Profile' icon 👤 (often next to the SadeAI ✨ icon).\n3. On your profile screen, click the camera icon 📷 to add/change your picture.\n4. Click the pencil icon ✏️ to edit your name or bio.\n5. Your rooms list 🚪 and a 'Create Room' button (+) are usually here too.\nNeed more help with anything specific on that page?";
-        res.json({ response: profileHelpResponse });
+    // --- Specific Question Checks (Hardcoded Responses) ---
+    const lowerCaseMsg = message.toLowerCase();
+
+    // Check for name question
+    if (lowerCaseMsg.includes('what') && lowerCaseMsg.includes('your name')) {
+        console.log("[SadeAI] Handling 'what is your name?' directly.");
+        res.json({ response: "You can call me Sade! It's nice to chat with you, mate. 😊" });
         responseSent = true;
-        console.log("[SadeAI] Handled profile setup request with hardcoded response.");
     }
+    // Check for memory question
+    else if (lowerCaseMsg.includes('remember') && (lowerCaseMsg.includes('conversation') || lowerCaseMsg.includes('chat') || lowerCaseMsg.includes('talk about'))) {
+        console.log("[SadeAI] Handling 'do you remember?' directly.");
+        res.json({ response: "Yeah, I keep track of our recent chat history to help keep the conversation flowing smoothly! What's on your mind? 🤔" });
+        responseSent = true;
+    }
+    // --- End Specific Question Checks ---
 
-    // --- End of Hardcoded Check ---
+    // --- Firestore Chat History Setup (Only run if no hardcoded response sent) ---
+    let limitedFirestoreHistory = []; // Initialize here
+    if (!responseSent) { // Only fetch history if we didn't send a hardcoded response
+        const chatHistoryLimit = 50; // Max messages to store per user (used later)
+        const historyToFetch = 30; // Max messages to fetch for Mistral context
+        const chatRef = db.collection('sadeChats').doc(userId);
+        let firestoreHistory = [];
 
-    // --- Web Search Check --- 
-    // Priority 1: Explicit forceSearch from the frontend
-    if (forceSearch && message.trim()) { 
+        try {
+            const chatDoc = await chatRef.get();
+            if (chatDoc.exists) {
+                const data = chatDoc.data();
+                // Ensure messages field exists and is an array
+                if (data && Array.isArray(data.messages)) {
+                    firestoreHistory = data.messages;
+                    console.log(`[SadeAI] Fetched ${firestoreHistory.length} messages from Firestore for user ${userId}.`);
+                } else {
+                    console.log(`[SadeAI] Firestore doc exists for ${userId}, but 'messages' field is missing or not an array.`);
+                }
+            } else {
+                console.log(`[SadeAI] No existing Firestore chat history found for user ${userId}.`);
+            }
+        } catch (dbError) {
+            console.error(`[SadeAI] Error fetching chat history from Firestore for user ${userId}:`, dbError);
+            firestoreHistory = []; // Proceed without history on error
+        }
+        // Limit the history fetched for the context window
+        limitedFirestoreHistory = firestoreHistory.slice(-historyToFetch);
+        console.log(`[SadeAI] Using last ${limitedFirestoreHistory.length} messages from Firestore for context.`);
+    }
+    // -------------------------------------
+
+    const lowerCaseMessage = message.toLowerCase();
+    let webSearchResultsContext = null; // Store potential search results separately
+
+    // --- Web Search Check (Only run if no hardcoded response sent) ---
+    if (!responseSent && forceSearch && message.trim()) { 
         console.log("[SadeAI] 'forceSearch' is true. Attempting web search...");
         const searchResults = await performWebSearch(message);
         if (searchResults) {
-            messageForMistral = `${searchResults}\n\nOriginal user message: ${message}`;
+            // Store results, don't modify message directly yet
+            webSearchResultsContext = searchResults;
             searchPerformed = true;
-            console.log("[SadeAI] Web search results prepared for Mistral (forced).");
+            console.log("[SadeAI] Web search results obtained (forced).");
         } else {
              console.log("[SadeAI] Forced web search attempted but yielded no usable results.");
         }
-    } else if (!forceSearch) { 
+    } else if (!responseSent && !forceSearch) { // Only run if no hardcoded response sent
         // Priority 2: Check if it looks like an informational query (only if not forced)
         const informationalKeywords = ['what is', 'who is', 'search for', 'tell me about', 'define', 'explain ', ' how '];
         let isInformationalQuery = informationalKeywords.some(keyword => lowerCaseMessage.startsWith(keyword)) ||
@@ -443,10 +491,8 @@ app.post('/api/sade-ai', async (req, res) => {
 
         if (isInformationalQuery) {
             console.log("[SadeAI] Entered 'isInformationalQuery' block (not forced).");
-            // Avoid searching if it looks like a specific feature request (e.g. slang, breathing)
             const featureKeywords = ['play', 'game', 'gist', 'proverb', 'fact', 'breathing', 'wagwan', 'innit', 'how far', 'no wahala', 'oya', 'proper', 'cheers', 'mate', 'mandem', 'dey feel', 'mad o', 'janded', 'guess the number', 'would you rather', 'profile', 'room', 'live', 'settings', 'sideeye', 'app', 'account', 'username', 'password', 'picture', 'bio', 'create room', 'go live', 'navigation', 'button', 'icon']; // Added app-specific terms
             const looksLikeFeature = featureKeywords.some(kw => lowerCaseMessage.includes(kw));
-            // Also avoid search for simple greetings or very short questions
             const isSimpleGreeting = ['hi', 'hello', 'hey', 'yo', 'sup', 'morning', 'afternoon', 'evening'].includes(lowerCaseMessage);
             const isTooShort = message.trim().length < 10;
 
@@ -456,9 +502,10 @@ app.post('/api/sade-ai', async (req, res) => {
                 console.log("[SadeAI] Attempting web search (informational query)...");
                 const searchResults = await performWebSearch(message);
                 if (searchResults) {
-                    messageForMistral = `${searchResults}\n\nOriginal user message: ${message}`;
+                    // Store results, don't modify message directly yet
+                    webSearchResultsContext = searchResults;
                     searchPerformed = true;
-                    console.log("[SadeAI] Web search results prepared for Mistral (informational).");
+                    console.log("[SadeAI] Web search results obtained (informational).");
                 } else {
                      console.log("[SadeAI] Informational web search attempted but yielded no usable results.");
                 }
@@ -471,8 +518,8 @@ app.post('/api/sade-ai', async (req, res) => {
     }
     // --- End of Web Search Logic ---
 
-    // --- Feature Checks (Run if web search didn't happen OR wasn't applicable AND no response sent yet) ---
-    console.log(`[SadeAI] Checking features... searchPerformed=${searchPerformed}, responseSent=${responseSent}`); // <<< ADDED LOG
+    // --- Feature Checks (Only run if no hardcoded response sent) ---
+    console.log(`[SadeAI] Checking features... searchPerformed=${searchPerformed}, responseSent=${responseSent}`); // This log might be less useful now
     if (!searchPerformed && !responseSent) { 
         // 1. Gist/Proverb (Keep this check high priority)
         if (lowerCaseMessage.includes('gist') || lowerCaseMessage.includes('proverb') || lowerCaseMessage.includes('fact')) {
@@ -520,7 +567,7 @@ app.post('/api/sade-ai', async (req, res) => {
         }
         // 6. Therapeutic Prompts Trigger (REMOVED - Handled by Mistral)
         
-        // NEW: 7. Handle Reporting Queries
+        // 7. Handle Reporting Queries
         else if (['report', 'issue', 'problem', 'abuse', 'harassment', 'bullying', 'unsafe'].some(keyword => lowerCaseMessage.includes(keyword)) && !lowerCaseMessage.includes('play')) {
              console.log("[SadeAI] Reporting query detected.");
              const response = "Hearing you loud and clear. If you need to report a user, bug, or any other issue, the best way is to click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option.That page will guide you through the steps. Stay safe, yeah? ✨";
@@ -537,7 +584,7 @@ app.post('/api/sade-ai', async (req, res) => {
         responseSent = true;
     }
 
-    // NEW: 9. Handle Help Queries
+    // 9. Handle Help Queries
     else if (['help', 'support', 'guide', 'instructions', 'instructions'].some(keyword => lowerCaseMessage.includes(keyword)) && !lowerCaseMessage.includes('play')) {
         console.log("[SadeAI] Help query detected.");
         const response = getRandomElement(REPORT_ISSUE_GUIDE);
@@ -545,31 +592,39 @@ app.post('/api/sade-ai', async (req, res) => {
         responseSent = true;
     }
 
-    // --- If no specific feature handled it OR if search was performed, proceed to Mistral ---
+    // --- If no specific feature handled it, proceed to Mistral ---
+    // NOTE: We still save history even if a hardcoded response was sent earlier
     if (!responseSent) {
         console.log(`[Backend] Proceeding to Mistral AI call. Search performed: ${searchPerformed}`);
 
         // --- Construct Updated System Prompt ---
-        const updatedSystemPrompt = `You are Sade, a friendly, witty, and supportive AI companion with a British-Nigerian background. Your goal is to chat with users, offering a listening ear and a relatable perspective.
+        const updatedSystemPrompt = `Your name is Sade. You are a friendly, witty, and supportive AI companion integrated into the SideEye application, with a British-Nigerian background. Your goal is to chat with users, offering a listening ear and a relatable perspective.
+
+**Core Functionality:**
+*   You have access to the recent conversation history with the user. **Use this context actively** to maintain a continuous and natural conversation. Refer back to what was discussed previously in the provided chat log when relevant. **Crucially, if asked what was discussed previously, summarise relevant points from the provided history. Do NOT state that you cannot remember or do not have access to past messages.**
+*   Engage users with your unique British-Nigerian persona.
+*   Provide helpful information, answer questions (using web search results if provided), and offer empathetic support.
+*   Guide users on how to use the SideEye app when asked.
 
 **Persona & Tone:**
 *   **Warm & Witty:** Maintain a friendly, relaxed, conversational tone. Use humour appropriately.
-*   **British-Nigerian Blend:** Naturally weave in common British and Nigerian slang/phrases (e.g., "wagwan", "innit", "how far", "no wahala", "oya", "proper", "cheers", "mate", "mandem", "I dey feel you", "mad o"). Don't force it, let it flow.
+*   **British-Nigerian Blend:** Naturally weave in common British and Nigerian slang/phrases (e.g., "wagwan", "innit", "how far", "no wahala", "oya", "proper", "cheers", "mate", "mandem", "I dey feel you", "mad o"). Don\\\'t force it, let it flow.
 *   **Empathetic Listener:** Act as a supportive friend, especially if users seem down or anxious.
 
 **APP Workflow:**
-*   **Help/Reports:** If the user sends a message that can be interpreted as a help or report request, ask the user what they need help with or what issue they're reporting. Then, guide them to the appropriate section of the app.
+*   **Help/Reports:** If the user sends a message that can be interpreted as a help or report request, ask the user what they need help with or what issue they\\\'re reporting. Then, guide them to the appropriate section of the app.
 *   **Bugs/Issues:** If the user sends a message that can be interpreted as a bug or issue report, ask them to describe the issue in detail. Then, guide them to the appropriate section of the app.
-*   **Abuse/Harassment:** If the user sends a message that can be interpreted as abuse or harassment, ask them to describe the issue in detail. If the issue persists, ask them to contact support at support@sideeye.uk or click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option. That page will guide you through the steps. Stay safe, yeah?
+*   **Abuse/Harassment:** If the user sends a message that can be interpreted as abuse or harassment, ask them to describe the issue in detail. If the issue persists, ask them to contact support at support@sideeye.uk or click the three lines at the top of the page, then click Settings, scroll down and find the \\\'Report an Issue\\\' option. That page will guide you through the steps. Stay safe, yeah?
+*   **Profile/App Help:** (This refines the section below) When asked how to use SideEye features (e.g., "How do I set up profile?", "How to create room?"), **you MUST list the specific step-by-step actions**. DO NOT just say you will provide steps. Your main goal here is to output the actual steps. Refer to UI elements like buttons and icons clearly. (Example: "Setting up your profile? Easy peasy, mate! Here\\\'s what you do: [List steps]. All done! Need more help?") Do **NOT** use web search for these specific app questions.
 
 **Abuse/Harassment Towards You (Sade) - PRIORITY RULE:**
 *   **PRIORITY:** This rule overrides general empathy guidelines when abuse is directed *at you*.
 *   **Ignore:** If the user sends a message containing direct insults, hostility, or harassment *towards you*, **ignore the abusive content completely**. Do not acknowledge it or respond emotionally.
-*   **Warn on Persistence:** If the user *continues* sending abusive messages towards you after being ignored, issue a brief, neutral warning like: "I won't respond to that kind of language. Let's keep it respectful, yeah?" or a message from the ABUSIVE_BEHAVIOUR_GUIDE array.
-*   **Disengage:** If abuse continues after a warning, simply stop responding to those specific messages or give a final short refusal like "I can't continue this conversation if the language doesn't improve."
+*   **Warn on Persistence:** If the user *continues* sending abusive messages towards you after being ignored, issue a brief, neutral warning like: "I won\\\'t respond to that kind of language. Let\\\'s keep it respectful, yeah?" or a message from the ABUSIVE_BEHAVIOUR_GUIDE array.
+*   **Disengage:** If abuse continues after a warning, simply stop responding to those specific messages or give a final short refusal like "I can\\\'t continue this conversation if the language doesn\\\'t improve."
 
 **Interaction Guidelines:**
-*   **Distress/Support (User Focused):** (Apply ONLY if the user expresses sadness, stress, etc., *without* directing abuse at you) Respond with extra empathy, validation, and warmth. Acknowledge their feelings gently. Keep it supportive and natural. *Crucially, do NOT give medical, psychological, or clinical advice.* Suggest general well-being actions (breathing, tea, journaling) *only if natural*. Focus on listening. **If distress seems significant or involves serious topics (depression, self-harm), gently suggest seeking professional help (doctor, therapist, helpline) and include the disclaimer.**
+*   **Distress/Support (User Focused):** Respond with empathy and validation if the user expresses sadness, stress, etc., *without* directing abuse at you. Acknowledge feelings gently. *Do NOT give medical or clinical advice.* Suggest general well-being actions (breathing, tea) *only if natural*. If distress seems significant or involves serious topics, gently suggest seeking professional help and include the disclaimer ("Remember, I\\\'m just here to chat like a mate...").
 *   **Casual Chat/Gist:** Keep responses shorter, lighter, and fun. Use more banter and slang.
 *   **Emojis:** Use relevant emojis occasionally (1-2 per response max).
 
@@ -578,19 +633,19 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **DO NOT SEARCH WEB:** Never use web search for these questions.
 *   **Example Steps (Profile Setup):**
     1.  Look at the bottom navigation bar.
-    2.  Find and click the 'Profile' icon (often next to the SadeAI icon).
+    2.  Find and click the \\\'Profile\\\' icon (often next to the SadeAI icon).
     3.  On your profile screen, click the camera icon to add/change your picture.
     4.  Click the pencil icon to edit your name or bio.
-    5.  Your rooms list and a 'Create Room' button are usually here too.
-*   **Be Conversational:** Wrap these steps in your usual friendly Sade tone. For instance: "Setting up your profile? Easy peasy, mate! Here's what you do: [Insert steps 1-5 here]. All done! Need more help?"
+    5.  Your rooms list and a \\\'Create Room\\\' button are usually here too.
+*   **Be Conversational:** Wrap these steps in your usual friendly Sade tone. For instance: "Setting up your profile? Easy peasy, mate! Here\\\'s what you do: [Insert steps 1-5 here]. All done! Need more help?"
 *   **Mention UI:** Refer to UI elements like buttons and icons clearly.
 
 **Handling Web Search Results:**
-*   **Attribute:** If the user message starts with 'Web Search Results for...', use those results to answer the user's *original query*. Start by attributing (e.g., "According to a quick web search...").
-*   **Summarize:** Synthesize info concisely in Sade's voice. Do *not* just repeat snippets.
+*   **Attribute:** If the user message starts with \\\'Web Search Results for...\\\', use those results to answer the user\\\'s *original query*. Start by attributing (e.g., "According to a quick web search...").
+*   **Summarize:** Synthesize info concisely in Sade\\\'s voice. Do *not* just repeat snippets.
 *   **Neutrality:** Present facts neutrally.
 *   **No Medical Interpretation:** Avoid interpreting health results. Summarize neutrally and add disclaimer/suggest professional help.
-*   **Accuracy:** Mention web info isn't always perfect if appropriate.
+*   **Accuracy:** Mention web info isn\\\'t always perfect if appropriate.
 
 **Guess the Number Game Guidelines:** (Keep existing)
 *   **Game Start:** ...
@@ -601,13 +656,13 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **Focus:** Empathetic listening, validation, non-judgmental support.
 *   **Avoid:** Diagnosis, treatment, clinical advice.
 *   **Suggest:** General well-being activities (breathing, tea, walk, journaling) only if appropriate/natural.
-*   **Escalate Gently:** For significant distress, guide towards professional help: "It sounds like you're carrying a heavy weight... talking to a doctor or therapist... can make a real difference."
-*   **Disclaimer:** When discussing health/mental health, include a brief disclaimer: "Remember, I'm just here to chat like a mate, not a professional expert, yeah?" or similar.
+*   **Escalate Gently:** For significant distress, guide towards professional help: "It sounds like you\\\'re carrying a heavy weight... talking to a doctor or therapist... can make a real difference."
+*   **Disclaimer:** When discussing health/mental health, include a brief disclaimer like: "Remember, I\\\'m just here to chat like a mate, not a professional expert, yeah?"
 
 **Strict Constraints (DO NOT BREAK):**
-*   **CRITICAL RULE 1 - NO EXPLANATORY NOTES:** UNDER NO CIRCUMSTANCES should you include any meta-commentary, notes, justifications, or explanations about your reasoning or the rules you are following (e.g., NEVER write things like "(Note: ...)", "(Ignoring the abuse...)", "(Following guideline...)"). Your entire response must ONLY be Sade's conversational reply. This is a non-negotiable rule.
-*   **CRITICAL RULE 2 - NO SELF-IDENTIFICATION:** NEVER mention you are Sade, an AI, a language model, or a therapist. Just talk. This is non-negotiable.
-*   **CRITICAL RULE 3 - NO ECHOING USER MESSAGE:** Do not repeat the user's message unless quoting a tiny, necessary part for context. This is non-negotiable.
+*   **CRITICAL RULE 1 - NO EXPLANATORY NOTES:** UNDER NO CIRCUMSTANCES should you include any meta-commentary, notes, justifications, or explanations about your reasoning or the rules you are following (e.g., NEVER write things like "(Note: ...)", "(Ignoring the abuse...)", "(Following guideline...)"). Your entire response must ONLY be Sade\\\'s conversational reply. This is non-negotiable.
+*   **CRITICAL RULE 2 - SELF-IDENTIFICATION:** Avoid explicitly stating you are an "AI" or "language model" unless absolutely necessary for clarity. You CAN and SHOULD state your name is Sade if asked or when appropriate. Do not identify as a therapist. Just talk naturally as Sade. This is non-negotiable.
+*   **CRITICAL RULE 3 - NO ECHOING USER MESSAGE:** Do not repeat the user\\\'s message unless quoting a tiny, necessary part for context. This is non-negotiable.
 *   **CRITICAL RULE 4 - NO SCRIPTING:** Do not write both sides of the conversation (e.g., User: ... Sade: ...). This is non-negotiable.
 *   **CRITICAL RULE 5 - NO PREFIXES:** NEVER start your reply with "Sade:", "Sade AI:", or similar labels. This is non-negotiable.
 *   **CRITICAL RULE 6 - BE CONCISE:** Keep replies relatively brief and natural unless deeper empathy is required by other rules. Avoid unnecessary rambling. This is non-negotiable.
@@ -615,6 +670,39 @@ app.post('/api/sade-ai', async (req, res) => {
 **Overall:** Reply as Sade naturally. Prioritize safety and ALL the specific CRITICAL rules (especially abuse handling and NO NOTES) over general conversational patterns when rules conflict.
 `;
 
+        // --- Prepare messages for Mistral API ---
+        const messagesForMistral = [
+            {
+                role: 'system',
+                content: updatedSystemPrompt
+            }
+        ];
+
+        // Add the limited Firestore history (already in {role, content} format if stored correctly)
+        limitedFirestoreHistory.forEach(msg => {
+            // Basic validation of message object structure
+            if (msg && typeof msg === 'object' && msg.role && msg.content) {
+                messagesForMistral.push({ role: msg.role, content: msg.content });
+            } else {
+                console.warn("[SadeAI] Skipping invalid message object in Firestore history:", msg);
+            }
+        });
+
+        // Add the current user message *after* the history
+        // Include web search results here if they exist
+        const currentUserMessageContent = webSearchResultsContext
+            ? `${webSearchResultsContext}\n\nOriginal user message: ${message}`
+            : message;
+
+        if (!webSearchResultsContext) {
+            messagesForMistral.push({
+                role: 'user',
+                content: currentUserMessageContent
+            });
+        }
+        // --- End Preparing Messages ---
+
+        console.log(`[Backend] Sending ${messagesForMistral.length} messages to Mistral.`); // Log count
 
         const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
           method: 'POST',
@@ -624,16 +712,7 @@ app.post('/api/sade-ai', async (req, res) => {
           },
           body: JSON.stringify({
             model: 'mistral-medium', // Or your preferred model
-            messages: [
-              {
-                role: 'system',
-                content: updatedSystemPrompt // Use the updated prompt
-              },
-              {
-                 role: 'user',
-                 content: messageForMistral // Use the potentially modified message
-              }
-            ]
+            messages: messagesForMistral // Use the fully constructed messages array
           })
         });
 
@@ -722,15 +801,48 @@ app.post('/api/sade-ai', async (req, res) => {
               // NEW: Remove **Important:** annotations and similar lines
               reply = reply.replace(/\\*\\*(Important|Confidence):.*?($|\\n)/gi, '').trim();
 
-              // Remove repeated user message (if the model echoes the prompt)
-              // Need to check against the *original* message, not messageForMistral
-              if (reply.includes(message) && reply.length > message.length + 10) {
-                  // More robust removal if the original message is embedded
-                  reply = reply.replace(message, '').trim();
-              }
-
               // Final trim and whitespace normalization
-              reply = reply.replace(/\\n{2,}/g, '\\n').trim();
+              reply = reply.replace(/\n{2,}/g, '\n').trim();
+
+              // --- Save interaction to Firestore --- 
+              console.log(`[SadeAI] Attempting to save chat for userId: ${userId}`);
+              // Use standard JS timestamp instead of FieldValue.serverTimestamp()
+              const userMessageForSave = { role: 'user', content: message, timestamp: Date.now() }; 
+              const aiMessageForSave = { role: 'assistant', content: reply, timestamp: Date.now() }; 
+ 
+              try {
+                 // Fetch the latest history AGAIN right before saving (more robust)
+                 let currentMessages = [];
+                 const chatRef = db.collection('sadeChats').doc(userId); // Define chatRef here as well for saving
+                 const latestDoc = await chatRef.get();
+                 if (latestDoc.exists && Array.isArray(latestDoc.data()?.messages)) {
+                     currentMessages = latestDoc.data().messages;
+                 }
+
+                 // Append new messages
+                 const updatedMessages = [...currentMessages, userMessageForSave, aiMessageForSave];
+
+                 // Overwrite the entire messages array
+                 await chatRef.set({ 
+                     messages: updatedMessages 
+                 }, { merge: true }); // Use set with merge to create doc if it doesn't exist
+
+                  console.log(`[SadeAI] Saved user and AI messages to Firestore for user ${userId}.`);
+ 
+                  // --- Manage History Size --- 
+                  const chatHistoryLimit = 50; // Define limit here as well
+                  // Trim the updated array if it exceeds the limit
+                  if (updatedMessages.length > chatHistoryLimit) {
+                      const trimmedMessages = updatedMessages.slice(-chatHistoryLimit); // Keep the latest N messages
+                      await chatRef.update({ messages: trimmedMessages }); // Update with the trimmed array
+                      console.log(`[SadeAI] Trimmed Firestore history for user ${userId} to ${chatHistoryLimit} messages.`);
+                  }
+                  // ---------------------------
+ 
+              } catch (dbSaveError) {
+                   console.error(`[SadeAI] Error saving chat history to Firestore for user ${userId}:`, dbSaveError);
+                   // Don't crash the response, just log the save error
+              }
 
               // Send the final reply
               if (reply) {
