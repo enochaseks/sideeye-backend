@@ -803,8 +803,7 @@ app.post('/api/sade-ai', async (req, res) => {
                              gameOver: game.gameOver,
                              winner: game.winner
                          });
-                         responseSent = true;
-                         // --- End AI's Turn ---
+                         responseSent = true; // --- End AI's Turn ---
                      }
                 }
             }
@@ -1312,6 +1311,55 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- NEW: Handle Video Sharing --- 
+  socket.on('share-video', async (data) => {
+    const { roomId, videoUrl, userId } = data;
+    if (!roomId || !userId) { // videoUrl can be empty to clear
+      console.warn('[Server] Malformed share-video data:', data);
+      return;
+    }
+
+    console.log(`[Server] User ${userId} attempting to share video in room ${roomId}: ${videoUrl}`);
+
+    try {
+      // TODO: Potentially add a check here to ensure 'userId' is the actual room owner
+      // or has permission to share videos if you want to implement such restrictions.
+
+      const roomRef = db.collection('sideRooms').doc(roomId);
+      const roomDoc = await roomRef.get();
+
+      if (!roomDoc.exists) {
+        console.warn(`[Server] Room ${roomId} not found during share-video request.`);
+        socket.emit('share-video-failed', { reason: 'Room not found.' });
+        return;
+      }
+
+      const roomData = roomDoc.data();
+      if (roomData.ownerId !== userId) {
+        console.warn(`[Server] User ${userId} is not the owner of room ${roomId}. Denying video share.`);
+        socket.emit('share-video-failed', { reason: 'Only the room owner can share videos.' });
+        return;
+      }
+
+      await roomRef.update({
+        currentSharedVideoUrl: videoUrl || null, // Store null if videoUrl is empty/falsy to clear
+        lastActive: FieldValue.serverTimestamp() // Update last active time
+      });
+
+      console.log(`[Server] Updated currentSharedVideoUrl for room ${roomId} to: ${videoUrl || null}`);
+
+      // Broadcast the new video URL to all clients in the room
+      io.to(roomId).emit('video-shared', { roomId, videoUrl: videoUrl || null });
+      console.log(`[Server] Broadcasted 'video-shared' to room ${roomId} with URL: ${videoUrl || null}`);
+
+    } catch (error) {
+      console.error(`[Server] Error processing share-video for room ${roomId}:`, error);
+      // Optionally emit an error back to the sender
+      // socket.emit('action-failed', { action: 'share-video', error: 'Server error processing video share' });
+      socket.emit('share-video-failed', { reason: 'Server error processing video share.' });
+    }
+  });
+
   // Handle leaving room (from server.ts)
   socket.on('leave-room', (roomId, userId) => {
     handleUserLeaveRoom(socket, roomId, userId);
@@ -1450,6 +1498,170 @@ io.on('connection', (socket) => {
       // Optional: Still try to clean up server state if user is in room map but socket is missing
       console.log(`[Server] Calling handleUserLeaveRoom anyway for ${targetUserId} (user not found in sockets)`);
       handleUserLeaveRoom(null, roomId, targetUserId);
+    }
+  });
+
+  // --- NEW: Handle Inviting User to Room --- 
+  socket.on('invite-user-to-room', async (data) => {
+    const { roomId, inviterId, inviteeUsername } = data;
+    console.log(`[Server] Received invite-user-to-room: roomId=${roomId}, inviterId=${inviterId}, inviteeUsername=${inviteeUsername}`);
+
+    if (!roomId || !inviterId || !inviteeUsername) {
+      console.warn('[Server] Malformed invite-user-to-room data:', data);
+      socket.emit('invite-failed', { reason: 'Missing required information.' });
+      return;
+    }
+
+    try {
+      const roomRef = db.collection('sideRooms').doc(roomId);
+      const roomDoc = await roomRef.get();
+
+      if (!roomDoc.exists) {
+        console.warn(`[Server] Invite failed: Room ${roomId} not found.`);
+        socket.emit('invite-failed', { reason: 'Room not found.' });
+        return;
+      }
+      const roomData = roomDoc.data();
+
+      // Permission Check: Inviter must be owner or an existing guest
+      const inviterIsOwner = roomData.ownerId === inviterId;
+      const inviterIsGuest = roomData.viewers && roomData.viewers.some(member => member.userId === inviterId && member.role === 'guest');
+
+      if (!inviterIsOwner && !inviterIsGuest) {
+        console.warn(`[Server] Invite failed: User ${inviterId} does not have permission to invite to room ${roomId}.`);
+        socket.emit('invite-failed', { reason: 'You do not have permission to invite users to this room.' });
+        return;
+      }
+
+      // Find Invitee User by username
+      const usersRef = db.collection('users');
+      // Convert search term to lowercase for case-insensitive 'starts-with' type query
+      // const lowerSearchTerm = searchTerm.toLowerCase(); // No longer needed for case-sensitive
+      
+      // --- Using Case-Sensitive Search on 'username' field --- 
+      // NOTE: This requires an index on 'username' (ascending) in Firestore.
+      // It will NOT find users if the case doesn't match.
+      const query = usersRef
+        .orderBy('username') // Order by the actual username field
+        .startAt(inviteeUsername) // Use the original search term
+        .endAt(inviteeUsername + '\uf8ff') // Use the original search term
+        .limit(1); // Limit the number of results
+
+      const snapshot = await query.get();
+      const inviteeDoc = snapshot.docs[0];
+      const inviteeUserId = inviteeDoc.id;
+      const inviteeData = inviteeDoc.data();
+
+      // Check if invitee is already in the room or banned
+      if (roomData.ownerId === inviteeUserId || (roomData.viewers && roomData.viewers.some(member => member.userId === inviteeUserId))) {
+        console.warn(`[Server] Invite failed: User ${inviteeUsername} (${inviteeUserId}) is already in room ${roomId}.`);
+        socket.emit('invite-failed', { username: inviteeUsername, reason: `User "${inviteeUsername}" is already in this room.` });
+        return;
+      }
+      if (roomData.bannedUsers && roomData.bannedUsers.includes(inviteeUserId)) {
+        console.warn(`[Server] Invite failed: User ${inviteeUsername} (${inviteeUserId}) is banned from room ${roomId}.`);
+        socket.emit('invite-failed', { username: inviteeUsername, reason: `User "${inviteeUsername}" is banned from this room.` });
+        return;
+      }
+
+      // Add Invitee as Guest
+      const guestMember = {
+        userId: inviteeUserId,
+        username: inviteeData.username || 'GuestUser',
+        displayName: inviteeData.name || inviteeData.username || 'Guest User',
+        avatar: inviteeData.profilePic || '',
+        role: 'guest',
+        joinedAt: new Date(), // Use standard JS Date for arrayUnion
+        isMuted: true // Guests join muted by default
+      };
+
+      await roomRef.update({
+        viewers: FieldValue.arrayUnion(guestMember),
+        memberCount: FieldValue.increment(1) // Increment member count
+      });
+
+      // Add to user's list of joined rooms (optional, but good for consistency if you track this)
+      const userSideRoomDocRef = db.collection('users').doc(inviteeUserId).collection('sideRooms').doc(roomId);
+      await userSideRoomDocRef.set({
+        roomId: roomId,
+        name: roomData.name,
+        role: 'guest',
+        joinedAt: FieldValue.serverTimestamp(),
+        lastActive: FieldValue.serverTimestamp(),
+        thumbnailUrl: roomData.thumbnailUrl || null
+      }, { merge: true });
+
+
+      // Create Notification for Invitee
+      const inviterProfile = await db.collection('users').doc(inviterId).get();
+      const inviterName = inviterProfile.exists ? (inviterProfile.data().name || inviterProfile.data().username) : 'Someone';
+
+      const notificationData = {
+        type: 'room_invite',
+        senderId: inviterId,
+        senderName: inviterName,
+        senderAvatar: inviterProfile.exists ? (inviterProfile.data().profilePic || '') : '',
+        recipientId: inviteeUserId,
+        roomId: roomId,
+        roomName: roomData.name,
+        content: `${inviterName} invited you to join the room: ${roomData.name}`,
+        createdAt: FieldValue.serverTimestamp(),
+        isRead: false
+      };
+      await db.collection('notifications').add(notificationData);
+
+      console.log(`[Server] User ${inviteeUsername} (${inviteeUserId}) successfully invited as guest to room ${roomId} by ${inviterId}.`);
+      socket.emit('invite-success', { username: inviteeUsername, message: `Successfully invited ${inviteeUsername} to the room as a guest.` });
+      
+      // Notify the room that a new guest has joined (client can update UI based on presence or this)
+      io.to(roomId).emit('guest-joined', { roomId, guest: guestMember });
+
+    } catch (error) {
+      console.error(`[Server] Error processing invite-user-to-room for room ${roomId}:`, error);
+      socket.emit('invite-failed', { reason: 'An error occurred while processing the invitation.' });
+    }
+  });
+
+  // --- NEW: Handle User Search for Invites ---
+  socket.on('search-users-for-invite', async (data) => {
+    const { searchTerm } = data;
+    if (!searchTerm || typeof searchTerm !== 'string' || searchTerm.trim().length < 2) {
+      // Send empty results if search term is too short or invalid
+      socket.emit('user-search-results-for-invite', { users: [] });
+      return;
+    }
+
+    console.log(`[Server] Received search-users-for-invite with searchTerm: "${searchTerm}"`);
+
+    try {
+      const usersRef = db.collection('users');
+      // Convert search term to lowercase for case-insensitive 'starts-with' type query
+      // const lowerSearchTerm = searchTerm.toLowerCase(); // Not needed for case-sensitive search
+      
+      // --- Switching back to Case-SENSITIVE Search on 'username' field --- 
+      // NOTE: This requires an index on 'username' (ascending) in Firestore.
+      // It will NOT find users if the case doesn't match.
+      const query = usersRef
+        .orderBy('username') // Order by the actual username field
+        .startAt(searchTerm)   // Use the original case search term
+        .endAt(searchTerm + '\uf8ff') // Use the original case search term
+        .limit(10); // Limit the number of results
+
+      const snapshot = await query.get();
+      const users = snapshot.docs.map(doc => ({
+        id: doc.id,
+        username: doc.data().username,
+        name: doc.data().name,
+        profilePic: doc.data().profilePic || ''
+        // Add other relevant fields if needed by the client
+      }));
+
+      console.log(`[Server] Found ${users.length} users for searchTerm "${searchTerm}".`);
+      socket.emit('user-search-results-for-invite', { users });
+
+    } catch (error) {
+      console.error(`[Server] Error searching users for invite (searchTerm: "${searchTerm}"):`, error);
+      socket.emit('user-search-results-for-invite', { users: [], error: 'Failed to search users.' });
     }
   });
 });
