@@ -1851,8 +1851,12 @@ async function handleUserLeaveRoom(callingSocket, roomId, userId) { // socket ca
 }
 
 // Start server
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
+// Explicitly use the PORT environment variable provided by the platform (e.g., Railway)
+// Fallback to 8080 only if process.env.PORT is not set (useful for local dev)
+const effectivePort = process.env.PORT || 8080;
+
+httpServer.listen(effectivePort, () => {
+  console.log(`Server running on port ${effectivePort} in ${process.env.NODE_ENV || 'development'} mode`);
 });
 
 // Graceful shutdown
