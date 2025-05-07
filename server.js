@@ -234,7 +234,8 @@ app.post('/api/stream-token', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'healthy' });
+  console.log('[HEALTH CHECK] Responding 200 OK'); // Add log
+  res.sendStatus(200); // Send only a 200 OK status, no JSON body
 });
 
 // Service account test endpoint
