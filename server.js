@@ -13,7 +13,22 @@ const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { FieldValue } = require('firebase-admin/firestore');
-require('dotenv').config();
+
+const dotenvResult = require('dotenv').config(); // Store the result
+
+if (dotenvResult.error) {
+  console.error('Error loading .env file:', dotenvResult.error);
+} else {
+  console.log('.env file loaded successfully. Parsed variables:', dotenvResult.parsed);
+}
+// For more direct debugging, uncomment these lines temporarily:
+// console.log('RAW STREAM_API_KEY from process.env after dotenv:', process.env.STREAM_API_KEY);
+// console.log('RAW STREAM_API_SECRET from process.env after dotenv:', process.env.STREAM_API_SECRET);
+
+// --- Stream Chat SDK --- 
+const { StreamChat } = require('stream-chat');
+let streamClient;
+// --- End Stream Chat SDK ---
 
 const app = express();
 const httpServer = createServer(app);
@@ -109,6 +124,21 @@ try {
   process.exit(1);
 }
 
+// --- Initialize Stream Client ---
+// IMPORTANT: Ensure these are set in your .env file and Railway environment variables
+const STREAM_API_KEY = process.env.STREAM_API_KEY;
+const STREAM_API_SECRET = process.env.STREAM_API_SECRET;
+const STREAM_APP_ID = process.env.STREAM_APP_ID;
+
+if (STREAM_API_KEY && STREAM_API_SECRET) {
+  streamClient = StreamChat.getInstance(STREAM_API_KEY, STREAM_API_SECRET);
+  console.log('Stream Chat SDK initialized successfully.');
+} else {
+  console.error('Stream API Key or Secret is missing in environment variables! Stream features will be impacted.');
+  // streamClient will remain undefined, and token generation will fail.
+}
+// --- End Initialize Stream Client ---
+
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -149,6 +179,58 @@ const apiLimiter = rateLimit({
 // Apply general rate limiting
 app.use('/api/test', apiLimiter);
 app.use('/api/upload-image', apiLimiter);
+
+// --- Stream Token Endpoint ---
+app.post('/api/stream-token', async (req, res) => {
+  if (!streamClient) {
+    console.error('Stream client not initialized. Cannot generate token.');
+    return res.status(500).json({ error: 'Stream service not configured on server.' });
+  }
+
+  try {
+    const { userId, userName, userImage } = req.body; // Get userId from frontend request
+
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    // Optional: Verify user against Firebase Auth for added security
+    // This is a good practice to ensure the userId is legitimate.
+    try {
+      const userAuthRecord = await admin.auth().getUser(userId);
+      console.log(`Verified user ${userId} with Firebase Auth: ${userAuthRecord.displayName}`);
+    } catch (authError) {
+      console.warn(`Failed to verify user ${userId} with Firebase Auth:`, authError.message);
+      // Decide if you want to block token generation if Firebase verification fails.
+      // For now, we'll proceed but log a warning.
+      // return res.status(403).json({ error: 'User verification failed.' });
+    }
+    
+    // Upsert user to Stream. This creates the user in Stream if they don't exist,
+    // or updates them if they do. It's good practice to keep user info in Stream aligned.
+    await streamClient.upsertUser({
+        id: userId,
+        name: userName || userId, // Use provided userName or fallback to userId
+        image: userImage || undefined, // Optional: user's avatar from request
+        // role: 'user', // Optional: assign a default role
+        // --- ADD CUSTOM DATA ---
+        displayName: userName || userId, // Store our desired display name
+        customAvatarUrl: userImage || undefined // Store our desired avatar URL
+    });
+    console.log(`Upserted user ${userId} in Stream with custom displayName and avatarUrl.`);
+
+    // Revert to default token generation - Video grants caused issues with stream-chat SDK
+    const token = streamClient.createToken(userId);
+
+    console.log(`Generated default Stream token for user ${userId}.`); // Reverted log message
+    res.json({ token });
+
+  } catch (error) {
+    console.error('Error generating Stream token for user:', req.body.userId, error);
+    res.status(500).json({ error: 'Failed to generate Stream token', details: error.message });
+  }
+});
+// --- End Stream Token Endpoint ---
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -1241,6 +1323,8 @@ io.on('connection', (socket) => {
 
     console.log(`User ${userId} joining room ${roomId}`);
     socket.join(roomId);
+    // ADD THIS LOG
+    console.log(`[Server IO] Socket ${socket.id} (user ${userId}) successfully joined Socket.IO room: ${roomId}`);
 
     if (!rooms.has(roomId)) {
       rooms.set(roomId, new Set());
@@ -1259,57 +1343,56 @@ io.on('connection', (socket) => {
   });
 
   // Handle audio stream (from server.ts)
-  socket.on('audio-stream', (data) => { // Assume data has { roomId, userId, audio }
-    // Broadcast audio to everyone else in the room
-    // Add basic check for properties to prevent errors
-    if (data && data.roomId && data.userId && data.audio) {
-      console.log(`Received audio from ${data.userId} in ${data.roomId}, broadcasting...`);
-      socket.to(data.roomId).emit('audio-stream', {
-        audio: data.audio,
-        userId: data.userId
-      });
-    } else {
-      console.warn('Received malformed audio-stream data:', data);
-    }
-  });
+  // socket.on('audio-stream', (data) => { 
+  //   if (data && data.roomId && data.userId && data.audio) {
+  //     console.log(`Received audio from ${data.userId} in ${data.roomId}, broadcasting...`);
+  //     // Change from socket.to to io.to for broader testing
+  //     io.to(data.roomId).emit('audio-stream', { 
+  //       audio: data.audio,
+  //       userId: data.userId
+  //     });
+  //   } else {
+  //     console.warn('Received malformed audio-stream data:', data);
+  //   }
+  // });
 
   // Handle speaking status (from server.ts)
-  socket.on('user-speaking', (data) => { // Assume data has { roomId, userId, isSpeaking }
-    if (data && data.roomId && data.userId !== undefined && data.isSpeaking !== undefined) {
-      console.log(`User ${data.userId} speaking status in room ${data.roomId}:`, data.isSpeaking);
-      socket.to(data.roomId).emit('user-speaking', {
-        userId: data.userId,
-        isSpeaking: data.isSpeaking
-      });
-    } else {
-      console.warn('Received malformed user-speaking data:', data);
-    }
-  });
+  // socket.on('user-speaking', (data) => { // Assume data has { roomId, userId, isSpeaking }
+  //   if (data && data.roomId && data.userId !== undefined && data.isSpeaking !== undefined) {
+  //     console.log(`User ${data.userId} speaking status in room ${data.roomId}:`, data.isSpeaking);
+  //     socket.to(data.roomId).emit('user-speaking', {
+  //       userId: data.userId,
+  //       isSpeaking: data.isSpeaking
+  //     });
+  //   } else {
+  //     console.warn('Received malformed user-speaking data:', data);
+  //   }
+  // });
 
   // Handle mute status (from server.ts)
-  socket.on('user-muted', (data) => { // Assume data has { roomId, userId, isMuted }
-     if (data && data.roomId && data.userId !== undefined && data.isMuted !== undefined) {
-      console.log(`User ${data.userId} mute status in room ${data.roomId}:`, data.isMuted);
-      socket.to(data.roomId).emit('user-muted', {
-        userId: data.userId,
-        isMuted: data.isMuted
-      });
-    } else {
-      console.warn('Received malformed user-muted data:', data);
-    }
-  });
+  // socket.on('user-muted', (data) => { // Assume data has { roomId, userId, isMuted }
+  //    if (data && data.roomId && data.userId !== undefined && data.isMuted !== undefined) {
+  //     console.log(`User ${data.userId} mute status in room ${data.roomId}:`, data.isMuted);
+  //     socket.to(data.roomId).emit('user-muted', {
+  //       userId: data.userId,
+  //       isMuted: data.isMuted
+  //     });
+  //   } else {
+  //     console.warn('Received malformed user-muted data:', data);
+  //   }
+  // });
 
   // --- NEW: Handle Sound Effects --- 
-  socket.on('sound-effect', (data) => { // Assume data has { roomId, userId, soundUrl }
-    const { roomId, userId, soundUrl } = data;
-    if (roomId && userId && soundUrl) {
-      console.log(`User ${userId} triggered sound effect ${soundUrl} in room ${roomId}, broadcasting...`);
-      // Broadcast to everyone else in the room
-      socket.to(roomId).emit('sound-effect', data);
-    } else {
-      console.warn('Received malformed sound-effect data:', data);
-    }
-  });
+  // socket.on('sound-effect', (data) => { // Assume data has { roomId, userId, soundUrl }
+  //   const { roomId, userId, soundUrl } = data;
+  //   if (roomId && userId && soundUrl) {
+  //     console.log(`User ${userId} triggered sound effect ${soundUrl} in room ${roomId}, broadcasting...`);
+  //     // Broadcast to everyone else in the room
+  //     socket.to(roomId).emit('sound-effect', data);
+  //   } else {
+  //     console.warn('Received malformed sound-effect data:', data);
+  //   }
+  // });
 
   // --- NEW: Handle Video Sharing --- 
   socket.on('share-video', async (data) => {
@@ -1361,14 +1444,15 @@ io.on('connection', (socket) => {
   });
 
   // Handle leaving room (from server.ts)
-  socket.on('leave-room', (roomId, userId) => {
-    handleUserLeaveRoom(socket, roomId, userId);
+  socket.on('leave-room', async (roomId, userId) => { // Made async
+    await handleUserLeaveRoom(socket, roomId, userId); // Await the async function
   });
 
   // Handle disconnection (from server.ts)
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => { // Made async
     console.log('User disconnected:', socket.id);
     // Find and remove user from all rooms
+    const promises = []; // Collect promises for concurrent execution
     rooms.forEach((users, roomId) => {
       // Find the userId associated with the disconnected socket.id
       let userIdToRemove = null;
@@ -1380,9 +1464,10 @@ io.on('connection', (socket) => {
       }
       // If the disconnected user was found in this room's users set via userSockets map
       if (userIdToRemove && users.has(userIdToRemove)) {
-        handleUserLeaveRoom(socket, roomId, userIdToRemove);
+        promises.push(handleUserLeaveRoom(socket, roomId, userIdToRemove));
       }
     });
+    await Promise.all(promises); // Wait for all leave operations to complete
   });
 
   // --- Handle Owner Moderation Events ---
@@ -1492,12 +1577,12 @@ io.on('connection', (socket) => {
       }
       // 4. Clean up server state (pass null for socket context)
       console.log(`[Server] Calling handleUserLeaveRoom for ${targetUserId} (triggered by force-remove)`);
-      handleUserLeaveRoom(null, roomId, targetUserId);
+      handleUserLeaveRoom(null, roomId, targetUserId); // Await if critical path, else can be fire-and-forget
     } else {
       console.log(`[Server] Target user ${targetUserId} for force-remove not found or not connected in userSockets map.`);
       // Optional: Still try to clean up server state if user is in room map but socket is missing
       console.log(`[Server] Calling handleUserLeaveRoom anyway for ${targetUserId} (user not found in sockets)`);
-      handleUserLeaveRoom(null, roomId, targetUserId);
+      handleUserLeaveRoom(null, roomId, targetUserId); // Await if critical path
     }
   });
 
@@ -1552,11 +1637,27 @@ io.on('connection', (socket) => {
       const inviteeUserId = inviteeDoc.id;
       const inviteeData = inviteeDoc.data();
 
+      // --- Enhanced Logging for Invite Check ---
+      console.log(`[Server - Invite Check] Checking if invitee ${inviteeUserId} (${inviteeUsername}) is already in room ${roomId}.`);
+      console.log(`[Server - Invite Check] Room Owner ID: ${roomData.ownerId}`);
+      // Log the viewers array carefully - it might be large or contain sensitive info if not structured correctly
+      // Consider logging only relevant parts or user IDs if privacy is a concern
+      try {
+          console.log(`[Server - Invite Check] Current viewers array:`, JSON.stringify(roomData.viewers || [], null, 2));
+      } catch (e) {
+          console.error("[Server - Invite Check] Error stringifying viewers array for logging:", e);
+          console.log("[Server - Invite Check] Current viewers array (raw):", roomData.viewers);
+      }
+      const isAlreadyOwner = roomData.ownerId === inviteeUserId;
+      const isAlreadyViewer = roomData.viewers && roomData.viewers.some(member => member.userId === inviteeUserId);
+      console.log(`[Server - Invite Check] isAlreadyOwner: ${isAlreadyOwner}, isAlreadyViewer: ${isAlreadyViewer}`);
+      // --- End Enhanced Logging ---
+
       // Check if invitee is already in the room or banned
-      if (roomData.ownerId === inviteeUserId || (roomData.viewers && roomData.viewers.some(member => member.userId === inviteeUserId))) {
-        console.warn(`[Server] Invite failed: User ${inviteeUsername} (${inviteeUserId}) is already in room ${roomId}.`);
-        socket.emit('invite-failed', { username: inviteeUsername, reason: `User "${inviteeUsername}" is already in this room.` });
-        return;
+      if (isAlreadyOwner || isAlreadyViewer) {
+          console.warn(`[Server] Invite failed: User ${inviteeUsername} (${inviteeUserId}) is already in room ${roomId}.`);
+          socket.emit('invite-failed', { username: inviteeUsername, reason: `User "${inviteeUsername}" is already in this room.` });
+          return;
       }
       if (roomData.bannedUsers && roomData.bannedUsers.includes(inviteeUserId)) {
         console.warn(`[Server] Invite failed: User ${inviteeUsername} (${inviteeUserId}) is banned from room ${roomId}.`);
@@ -1667,7 +1768,7 @@ io.on('connection', (socket) => {
 });
 
 // Helper function - Refined for robustness
-function handleUserLeaveRoom(callingSocket, roomId, userId) { // socket can be the leaving socket OR null if called internally
+async function handleUserLeaveRoom(callingSocket, roomId, userId) { // socket can be the leaving socket OR null if called internally
   console.log(`[handleUserLeaveRoom] Cleaning up for user ${userId} in room ${roomId}. Triggered by socket: ${callingSocket?.id || 'Internal/Null'}`);
   
   let userExistedInRoom = false;
@@ -1679,30 +1780,73 @@ function handleUserLeaveRoom(callingSocket, roomId, userId) { // socket can be t
     console.log(`[handleUserLeaveRoom] User ${userId} ${userExistedInRoom ? 'deleted from' : 'not found in'} room map for ${roomId}. Members after delete:`, Array.from(room));
 
     // Broadcast user-left *only if user was successfully removed from the room map*
-    // Do this before potentially deleting the room itself
     if (userExistedInRoom) {
+      // Attempt to set user offline in Firestore presence collection
+      try {
+        const userPresenceRef = db.collection('sideRooms').doc(roomId).collection('presence').doc(userId);
+        await userPresenceRef.update({ isOnline: false, lastSeen: FieldValue.serverTimestamp() });
+        console.log(`[Server] Successfully set ${userId} offline in Firestore presence for room ${roomId}`);
+      } catch (error) {
+        if (error.code !== 5) { 
+             console.error(`[Server] Error setting ${userId} offline in Firestore presence for room ${roomId}:`, error);
+        } else {
+             console.log(`[Server] Presence doc for ${userId} in ${roomId} not found while trying to set offline.`);
+        }
+      }
+
+      // --- NEW: Remove user from the Firestore room's viewers array --- 
+      try {
+          const roomRef = db.collection('sideRooms').doc(roomId);
+          const roomDoc = await roomRef.get();
+          if (roomDoc.exists) {
+              const roomData = roomDoc.data();
+              if (roomData.viewers && Array.isArray(roomData.viewers)) {
+                  // Find the specific viewer object to remove
+                  const viewerToRemove = roomData.viewers.find(viewer => viewer.userId === userId);
+                  if (viewerToRemove) {
+                      console.log(`[Server] Found viewer object for ${userId} to remove from viewers array.`);
+                      console.log("[Server] Viewer object to remove:", JSON.stringify(viewerToRemove)); // Log the object
+                      // Use arrayRemove with the found object and decrement memberCount
+                      console.log(`[Server] Attempting Firestore update to remove viewer and decrement count for room ${roomId}...`);
+                      await roomRef.update({
+                          viewers: FieldValue.arrayRemove(viewerToRemove),
+                          memberCount: FieldValue.increment(-1) // Decrement count
+                      });
+                      console.log(`[Server] SUCCESS: Firestore update complete for viewer removal/count decrement (Room ${roomId}, User ${userId}).`);
+                  } else {
+                       console.warn(`[Server] User ${userId} was in memory map but not found in Firestore viewers array for room ${roomId}. Count not decremented.`);
+                  }
+              } else {
+                   console.warn(`[Server] Firestore viewers array missing or not an array for room ${roomId} during leave cleanup.`);
+              }
+          } else {
+               console.warn(`[Server] Room document ${roomId} not found during viewers array cleanup.`);
+          }
+      } catch(error) {
+           console.error(`[Server] Error removing user ${userId} from Firestore viewers array for room ${roomId}:`, error);
+      }
+      // --- END NEW --- 
+
       console.log(`[handleUserLeaveRoom] Broadcasting 'user-left' event for ${userId} to room ${roomId}.`);
-      // IMPORTANT: Use io.to(roomId) to broadcast to all sockets currently in the room
       io.to(roomId).emit('user-left', userId); 
     } else {
-      console.log(`[handleUserLeaveRoom] Skipping 'user-left' broadcast for ${userId} as they were not found/removed from the room map.`);
+      console.log(`[handleUserLeaveRoom] Skipping 'user-left' broadcast and Firestore viewer removal for ${userId} as they were not found/removed from the room map.`);
     }
 
-    // Check if room is now empty and delete if necessary
+    // Check if room is now empty and delete if necessary (in-memory map only)
     if (room.size === 0) {
       console.log(`[handleUserLeaveRoom] Room ${roomId} is now empty, deleting room from 'rooms' map.`);
       rooms.delete(roomId);
     }
   } else {
-    console.log(`[handleUserLeaveRoom] Room ${roomId} not found in 'rooms' map. Cannot broadcast user-left.`);
-    userExistedInRoom = false; // Ensure flag is false if room didn't exist
+    console.log(`[handleUserLeaveRoom] Room ${roomId} not found in 'rooms' map. Cannot process leave.`);
+    // Optional: Attempt Firestore cleanup even if not in memory? Maybe too risky.
   }
 
   // Always attempt to remove from userSockets map
   const userExistedInSockets = userSockets.delete(userId); 
   console.log(`[handleUserLeaveRoom] User ${userId} ${userExistedInSockets ? 'deleted from' : 'not found in'} userSockets map.`);
 
-  // Note: The 'user-left' broadcast now happens earlier, only if the user was confirmed to be in the room set.
 }
 
 // Start server
