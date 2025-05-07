@@ -182,15 +182,18 @@ app.use('/api/upload-image', apiLimiter);
 
 // --- Stream Token Endpoint ---
 app.post('/api/stream-token', async (req, res) => {
+  console.log('--- /api/stream-token HIT ---'); // Log entry
   if (!streamClient) {
-    console.error('Stream client not initialized. Cannot generate token.');
+    console.error('[Stream Token Route] Stream client not initialized!');
     return res.status(500).json({ error: 'Stream service not configured on server.' });
   }
 
   try {
     const { userId, userName, userImage } = req.body; // Get userId from frontend request
+    console.log(`[Stream Token Route] Received request for userId: ${userId}`); // Log userId
 
     if (!userId) {
+      console.warn('[Stream Token Route] User ID missing in request body.');
       return res.status(400).json({ error: 'User ID is required' });
     }
 
@@ -198,9 +201,9 @@ app.post('/api/stream-token', async (req, res) => {
     // This is a good practice to ensure the userId is legitimate.
     try {
       const userAuthRecord = await admin.auth().getUser(userId);
-      console.log(`Verified user ${userId} with Firebase Auth: ${userAuthRecord.displayName}`);
-    } catch (authError) {
-      console.warn(`Failed to verify user ${userId} with Firebase Auth:`, authError.message);
+      console.log(`[Stream Token Route] Verified user ${userId} with Firebase Auth.`);
+    } catch (authError) { // Removed : any
+      console.warn(`[Stream Token Route] Failed to verify user ${userId} with Firebase Auth:`, authError.message);
       // Decide if you want to block token generation if Firebase verification fails.
       // For now, we'll proceed but log a warning.
       // return res.status(403).json({ error: 'User verification failed.' });
@@ -208,6 +211,7 @@ app.post('/api/stream-token', async (req, res) => {
     
     // Upsert user to Stream. This creates the user in Stream if they don't exist,
     // or updates them if they do. It's good practice to keep user info in Stream aligned.
+    console.log('[Stream Token Route] Attempting Stream upsertUser...');
     await streamClient.upsertUser({
         id: userId,
         name: userName || userId, // Use provided userName or fallback to userId
@@ -217,16 +221,17 @@ app.post('/api/stream-token', async (req, res) => {
         displayName: userName || userId, // Store our desired display name
         customAvatarUrl: userImage || undefined // Store our desired avatar URL
     });
-    console.log(`Upserted user ${userId} in Stream with custom displayName and avatarUrl.`);
+    console.log(`[Stream Token Route] Upserted user ${userId} in Stream.`);
 
     // Revert to default token generation - Video grants caused issues with stream-chat SDK
+    console.log('[Stream Token Route] Attempting Stream createToken...');
     const token = streamClient.createToken(userId);
 
-    console.log(`Generated default Stream token for user ${userId}.`); // Reverted log message
+    console.log(`[Stream Token Route] Generated Stream token successfully for user ${userId}. Sending JSON...`); // Log success before sending
     res.json({ token });
 
-  } catch (error) {
-    console.error('Error generating Stream token for user:', req.body.userId, error);
+  } catch (error) { // Removed : any
+    console.error('[Stream Token Route] Error inside handler:', error); // Log error location
     res.status(500).json({ error: 'Failed to generate Stream token', details: error.message });
   }
 });
