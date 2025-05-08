@@ -34,7 +34,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // MODIFIED: Allow all origins for Socket.IO (temporary diagnostic)
+    origin: ['https://www.sideeye.uk', 'http://localhost:3000'], // REVERTED: Use specific allowed origins
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -72,7 +72,7 @@ app.use(cors(corsOptions));
 // This ensures preflight requests get the right headers immediately.
 // app.options('/api/sade-ai', cors(corsOptions)); // Already have general cors
 // MODIFIED: Apply a permissive CORS policy directly to /api/stream-token for diagnostics
-app.options('/api/stream-token', cors({ origin: "*", credentials: true, optionsSuccessStatus: 204 })); 
+// app.options('/api/stream-token', cors({ origin: "*", credentials: true, optionsSuccessStatus: 204 })); // REMOVED: Revert to general CORS handling
 
 // Apply other middleware AFTER the OPTIONS handler and main CORS
 app.set('trust proxy', 1); // Trust proxy - important for Railway deployment
@@ -184,7 +184,8 @@ app.use('/api/upload-image', apiLimiter);
 
 // --- Stream Token Endpoint ---
 // MODIFIED: Apply a permissive CORS policy directly to /api/stream-token for diagnostics
-app.post('/api/stream-token', cors({ origin: "*", credentials: true }), async (req, res) => {
+// app.post('/api/stream-token', cors({ origin: "*", credentials: true }), async (req, res) => { // REMOVED: Revert to general CORS handling
+app.post('/api/stream-token', async (req, res) => { // RESTORED: Use general CORS policy applied via app.use()
   console.log('--- /api/stream-token HIT ---'); // Log entry
   // Log all incoming headers for this request
   console.log('[Stream Token Route] Incoming Headers:', JSON.stringify(req.headers, null, 2));
