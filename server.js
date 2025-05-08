@@ -67,9 +67,13 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
+      // Log the problematic origin before rejecting
+      console.warn(`[CORS] Rejected Origin: "${origin}". Not in allowed list:`, allowedOrigins);
+      // const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      // return callback(new Error(msg), false); // DON'T throw error, just disallow
+      return callback(null, false); // Signal to disallow this origin
     }
+    // Origin is allowed
     return callback(null, true);
   },
   credentials: true,
