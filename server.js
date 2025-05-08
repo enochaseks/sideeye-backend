@@ -77,6 +77,10 @@ const corsOptions = {
   optionsSuccessStatus: 200 // Changed from 204 to 200 for broader compatibility
 };
 
+// Explicit OPTIONS handler using the SAME refined options
+// IMPORTANT: Place this BEFORE the general app.use(cors(corsOptions))
+app.options('*', cors(corsOptions)); // FIX: Ensure path is a valid string
+
 // Apply the main CORS middleware
 app.use(cors(corsOptions));
 
@@ -194,7 +198,11 @@ app.use('/api/upload-image', apiLimiter);
 
 // --- Stream Token Endpoint ---
 app.post('/api/stream-token', async (req, res) => {
-  console.log('--- /api/stream-token HIT ---'); // Log entry
+  console.log('--- /api/stream-token HIT ---');
+  // Log Headers (especially Origin)
+  console.log('[Stream Token Route] Request Origin Header:', req.headers.origin); // Direct access
+  console.log('[Stream Token Route] Full Request Headers:', JSON.stringify(req.headers, null, 2));
+  
   if (!streamClient) {
     console.error('[Stream Token Route] Stream client not initialized!');
     return res.status(500).json({ error: 'Stream service not configured on server.' });
