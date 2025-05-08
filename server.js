@@ -14,12 +14,14 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { FieldValue } = require('firebase-admin/firestore');
 
-const dotenvResult = require('dotenv').config(); // Store the result
-
-if (dotenvResult.error) {
-  console.error('Error loading .env file:', dotenvResult.error);
-} else {
-  console.log('.env file loaded successfully. Parsed variables:', dotenvResult.parsed);
+// Load .env file ONLY if not in production
+if (process.env.NODE_ENV !== 'production') {
+  const dotenvResult = require('dotenv').config();
+  if (dotenvResult.error) {
+    console.warn('Warning: Error loading .env file:', dotenvResult.error.message); // Use warn, not error
+  } else {
+    console.log('.env file loaded successfully.');
+  }
 }
 // For more direct debugging, uncomment these lines temporarily:
 // console.log('RAW STREAM_API_KEY from process.env after dotenv:', process.env.STREAM_API_KEY);
@@ -1896,14 +1898,30 @@ process.on('SIGTERM', () => {
   });
 });
 
+// --- Add more specific global error handlers ---
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('-------------------------------------');
+  console.error('Unhandled Rejection at:', promise);
+  console.error('Reason:', reason);
+  console.error('-------------------------------------');
+  // Optional: Graceful shutdown or crash prevention logic here if needed,
+  // but often it's better to let it crash in production for auto-restart,
+  // unless the reason is something recoverable.
 });
 
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  process.exit(1);
+process.on('uncaughtException', (error, origin) => {
+  console.error('-------------------------------------');
+  console.error(`Caught exception: ${error}\n` + `Exception origin: ${origin}`);
+  console.error(error.stack); // Log the full stack trace
+  console.error('-------------------------------------');
+  // IMPORTANT: According to Node.js docs, the process MUST exit after an uncaughtException.
+  // Attempting to resume normally can lead to undefined behavior.
+  // Log the error and exit gracefully if possible, or just exit.
+  console.error('Uncaught exception detected! Exiting process...');
+  // You might attempt a quick cleanup here if vital, but keep it fast.
+  process.exit(1); // Exit with a failure code
 });
+// --- End Add more specific global error handlers ---
 
 // --- STATIC FILE SERVING (MUST BE LAST) ---
 app.use(express.static(path.join(__dirname, '../frontend/build')));
