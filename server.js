@@ -85,7 +85,7 @@ const corsOptions = {
 
 // Explicit OPTIONS handler using the SAME refined options
 // IMPORTANT: Place this BEFORE the general app.use(cors(corsOptions))
-app.options('*', cors(corsOptions)); // FIX: Ensure path is a valid string
+// app.options('*', cors(corsOptions)); // REMOVE THIS LINE - Let app.use(cors()) handle preflights
 
 // Apply the main CORS middleware
 app.use(cors(corsOptions));
@@ -1329,6 +1329,11 @@ app.use((req, res) => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
+  // Log when ANY socket connection is established
+  console.log(`[SOCKET CONNECT] New connection established. Socket ID: ${socket.id}`);
+  // Add a small separator for readability in logs
+  console.log('-------------------------------------');
+
   // Handle joining room (from server.ts)
   socket.on('join-room', async (roomId, userId) => { 
     // Check if user is banned before allowing join
@@ -1888,6 +1893,8 @@ const effectivePort = process.env.PORT || 8080;
 
 httpServer.listen(effectivePort, () => {
   console.log(`Server running on port ${effectivePort} in ${process.env.NODE_ENV || 'development'} mode`);
+  // Log right after listen callback fires
+  console.log(`[SERVER START] HTTP server is successfully listening on port ${effectivePort}.`);
 });
 
 // Graceful shutdown
@@ -1990,4 +1997,7 @@ app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
   // 5. Send a success response back to the "sideroom" backend
   res.status(200).json({ status: 'event received' });
 });
+
+// Log at the very end of the script
+console.log('[SERVER END SCRIPT] server.js script fully parsed.');
 
