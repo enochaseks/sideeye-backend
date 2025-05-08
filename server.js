@@ -36,7 +36,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: ['https://www.sideeye.uk', 'http://localhost:3000'],
+    origin: ['https://www.sideeye.uk', 'https://sideeye.uk', 'http://localhost:3000'],
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -56,7 +56,8 @@ console.log('- Port:', PORT);
 console.log('- CORS Origin:', process.env.FRONTEND_URL);
 
 const allowedOrigins = [
-  'https://www.sideeye.uk',
+  'https://www.sideeye.uk', // With www
+  'https://sideeye.uk',    // WITHOUT www - ADD THIS
   'http://localhost:3000'
   // Add any other origins you need to support, like specific preview deployment URLs
 ];
