@@ -209,49 +209,49 @@ app.post('/api/stream-token', async (req, res) => {
   }
 
   try {
-    const { userId, userName, userImage } = req.body; // Get userId from frontend request
-    console.log(`[Stream Token Route] Received request for userId: ${userId}`); // Log userId
+    const { userId, userName, userImage } = req.body; 
+    console.log(`[Stream Token Route] Parsed body - userId: ${userId}, userName: ${userName}, userImage: ${userImage}`); // Log parsed body
 
     if (!userId) {
       console.warn('[Stream Token Route] User ID missing in request body.');
       return res.status(400).json({ error: 'User ID is required' });
     }
-
-    // Optional: Verify user against Firebase Auth for added security
-    // This is a good practice to ensure the userId is legitimate.
+    
+    // Firebase Auth Verification Step
     try {
+      console.log(`[Stream Token Route] Verifying user ${userId} with Firebase Auth...`);
       const userAuthRecord = await admin.auth().getUser(userId);
-      console.log(`[Stream Token Route] Verified user ${userId} with Firebase Auth.`);
-    } catch (authError) { // Removed : any
+      console.log(`[Stream Token Route] Verified user ${userId} with Firebase Auth successfully.`);
+    } catch (authError) { 
       console.warn(`[Stream Token Route] Failed to verify user ${userId} with Firebase Auth:`, authError.message);
       // Decide if you want to block token generation if Firebase verification fails.
       // For now, we'll proceed but log a warning.
       // return res.status(403).json({ error: 'User verification failed.' });
     }
     
-    // Upsert user to Stream. This creates the user in Stream if they don't exist,
-    // or updates them if they do. It's good practice to keep user info in Stream aligned.
-    console.log('[Stream Token Route] Attempting Stream upsertUser...');
+    // Stream Upsert User Step
+    console.log(`[Stream Token Route] Upserting user ${userId} in Stream...`);
     await streamClient.upsertUser({
         id: userId,
-        name: userName || userId, // Use provided userName or fallback to userId
-        image: userImage || undefined, // Optional: user's avatar from request
-        // role: 'user', // Optional: assign a default role
-        // --- ADD CUSTOM DATA ---
-        displayName: userName || userId, // Store our desired display name
-        customAvatarUrl: userImage || undefined // Store our desired avatar URL
+        name: userName || userId, 
+        image: userImage || undefined,
+        displayName: userName || userId, 
+        customAvatarUrl: userImage || undefined
     });
-    console.log(`[Stream Token Route] Upserted user ${userId} in Stream.`);
+    console.log(`[Stream Token Route] Upserted user ${userId} in Stream successfully.`);
 
-    // Revert to default token generation - Video grants caused issues with stream-chat SDK
-    console.log('[Stream Token Route] Attempting Stream createToken...');
+    // Stream Create Token Step
+    console.log(`[Stream Token Route] Creating Stream token for user ${userId}...`);
     const token = streamClient.createToken(userId);
+    console.log(`[Stream Token Route] Created Stream token successfully for user ${userId}.`);
 
-    console.log(`[Stream Token Route] Generated Stream token successfully for user ${userId}. Sending JSON...`); // Log success before sending
+    // Sending Response Step
+    console.log(`[Stream Token Route] Sending JSON response with token for user ${userId}...`);
     res.json({ token });
+    console.log(`[Stream Token Route] JSON response sent successfully for user ${userId}.`); // Log AFTER sending
 
-  } catch (error) { // Removed : any
-    console.error('[Stream Token Route] Error inside handler:', error); // Log error location
+  } catch (error) { 
+    console.error('[Stream Token Route] Error inside handler:', error);
     res.status(500).json({ error: 'Failed to generate Stream token', details: error.message });
   }
 });
