@@ -34,7 +34,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: ['https://www.sideeye.uk', 'http://localhost:3000'],
+    origin: "*", // MODIFIED: Allow all origins for Socket.IO (temporary diagnostic)
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -70,7 +70,9 @@ app.use(cors(corsOptions));
 
 // Explicitly handle OPTIONS requests for the specific API route *before* other middleware
 // This ensures preflight requests get the right headers immediately.
-app.options('/api/sade-ai', cors(corsOptions)); 
+// app.options('/api/sade-ai', cors(corsOptions)); // Already have general cors
+// MODIFIED: Apply a permissive CORS policy directly to /api/stream-token for diagnostics
+app.options('/api/stream-token', cors({ origin: "*", credentials: true, optionsSuccessStatus: 204 })); 
 
 // Apply other middleware AFTER the OPTIONS handler and main CORS
 app.set('trust proxy', 1); // Trust proxy - important for Railway deployment
@@ -181,8 +183,11 @@ app.use('/api/test', apiLimiter);
 app.use('/api/upload-image', apiLimiter);
 
 // --- Stream Token Endpoint ---
-app.post('/api/stream-token', async (req, res) => {
+// MODIFIED: Apply a permissive CORS policy directly to /api/stream-token for diagnostics
+app.post('/api/stream-token', cors({ origin: "*", credentials: true }), async (req, res) => {
   console.log('--- /api/stream-token HIT ---'); // Log entry
+  // Log all incoming headers for this request
+  console.log('[Stream Token Route] Incoming Headers:', JSON.stringify(req.headers, null, 2));
   if (!streamClient) {
     console.error('[Stream Token Route] Stream client not initialized!');
     return res.status(500).json({ error: 'Stream service not configured on server.' });
