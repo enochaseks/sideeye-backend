@@ -1892,14 +1892,32 @@ httpServer.listen(effectivePort, () => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received. Closing HTTP server...');
+  console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+  console.error('>>> SIGTERM signal received! Attempting graceful shutdown... <<<');
+  console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+  // Log potentially useful info right before shutdown
+  console.error(`Timestamp: ${new Date().toISOString()}`)
+  // You could potentially log memory usage here if needed: console.error(process.memoryUsage());
+  
   httpServer.close(() => {
-    console.log('HTTP server closed');
-    admin.app().delete().then(() => {
-      console.log('Firebase Admin SDK shutdown complete');
-      process.exit(0);
-    });
+    console.log('HTTP server closed gracefully due to SIGTERM.');
+    // Consider if Firebase Admin SDK needs explicit cleanup
+    // admin.app().delete().then(() => {
+    //   console.log('Firebase Admin SDK shutdown complete');
+    //   process.exit(0);
+    // }).catch(err => {
+    //   console.error('Error shutting down Firebase Admin:', err);
+    //   process.exit(1);
+    // });
+    // For now, just exit after server close
+    process.exit(0); 
   });
+  
+  // Force exit after a timeout if graceful shutdown hangs
+  setTimeout(() => {
+    console.error('Graceful shutdown timed out! Forcing exit.');
+    process.exit(1);
+  }, 10000); // 10 seconds timeout
 });
 
 // --- Add more specific global error handlers ---
