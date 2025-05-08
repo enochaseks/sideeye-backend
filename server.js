@@ -56,13 +56,25 @@ console.log('- CORS Origin:', process.env.FRONTEND_URL);
 const allowedOrigins = [
   'https://www.sideeye.uk',
   'http://localhost:3000'
+  // Add any other origins you need to support, like specific preview deployment URLs
 ];
 
 // Use simpler CORS config again
 const corsOptions = {
-  origin: allowedOrigins,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
   credentials: true,
-  optionsSuccessStatus: 204 // some legacy browsers (IE11, various SmartTVs) choke on 204
+  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'DELETE', 'PATCH'], // Explicitly list all methods you use
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token', 'Accept', 'Origin'], // Add more common headers
+  exposedHeaders: ['Content-Length', 'X-Request-ID'], // If you use any custom headers client needs to read
+  optionsSuccessStatus: 200 // Changed from 204 to 200 for broader compatibility
 };
 
 // Apply the main CORS middleware
@@ -70,7 +82,7 @@ app.use(cors(corsOptions));
 
 // Explicitly handle OPTIONS requests for the specific API route *before* other middleware
 // This ensures preflight requests get the right headers immediately.
-app.options('/api/sade-ai', cors(corsOptions)); 
+// app.options('/api/sade-ai', cors(corsOptions)); // REMOVED - General CORS should handle this
 
 // Apply other middleware AFTER the OPTIONS handler and main CORS
 app.set('trust proxy', 1); // Trust proxy - important for Railway deployment
