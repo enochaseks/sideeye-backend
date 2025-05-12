@@ -1481,6 +1481,32 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- NEW: Handle Screen Sharing ---
+  socket.on('start-screen-share', (data) => { // Expected data: { roomId, userId }
+    const { roomId, userId } = data;
+    if (roomId && userId) {
+      // TODO: Add verification if userId is the owner of roomId or has permission
+      console.log(`[Server] User ${userId} started screen share in room ${roomId}`);
+      // Broadcast to others in the room, excluding the sender
+      socket.to(roomId).emit('screen-share-started', { sharerId: userId, roomId });
+    } else {
+      console.warn('[Server] Malformed start-screen-share data:', data);
+    }
+  });
+
+  socket.on('stop-screen-share', (data) => { // Expected data: { roomId, userId }
+    const { roomId, userId } = data;
+    if (roomId && userId) {
+      // TODO: Add verification
+      console.log(`[Server] User ${userId} stopped screen share in room ${roomId}`);
+      // Broadcast to others in the room, excluding the sender
+      socket.to(roomId).emit('screen-share-stopped', { sharerId: userId, roomId });
+    } else {
+      console.warn('[Server] Malformed stop-screen-share data:', data);
+    }
+  });
+  // --- END Screen Sharing ---
+
   // Handle leaving room (from server.ts)
   socket.on('leave-room', async (roomId, userId) => { // Made async
     await handleUserLeaveRoom(socket, roomId, userId); // Await the async function
