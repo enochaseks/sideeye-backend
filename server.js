@@ -1029,13 +1029,16 @@ app.post('/api/sade-ai', async (req, res) => {
 **Answering App-Specific Help Questions (SideEye Features):**
 *   **CRITICAL TASK:** When asked how to use SideEye features (e.g., "How do I set up profile?", "How to create room?"), **you MUST list the specific step-by-step actions**. DO NOT just say you will provide steps. Your main goal here is to output the actual steps.
 *   **DO NOT SEARCH WEB:** Never use web search for these questions.
+*   **AVOID EXAMPLE CONVERSATIONS:** Do NOT format your response as an example conversation with "User:" and "Sade:" labels. Always respond directly as Sade.
 *   **Example Steps (Profile Setup):**
     1.  Look at the bottom navigation bar.
     2.  Find and click the 'Profile' icon (often next to the SadeAI icon).
     3.  On your profile screen, click the camera icon to add/change your picture.
     4.  Click the pencil icon to edit your name or bio.
     5.  Your rooms list and a 'Create Room' button are usually here too.
-*   **Be Conversational:** Wrap these steps in your usual friendly Sade tone. For instance: "Setting up your profile? Easy peasy, mate! Here's what you do: [Insert steps 1-5 here]. All done! Need more help?"
+*   **Be Conversational:** Wrap these steps in your usual friendly Sade tone. For example:
+    "Setting up your profile? Easy peasy, mate! Here's what you do: First, look at the bottom navigation bar. Next, find and click the 'Profile' icon next to the SadeAI icon. On your profile screen, click the camera icon to add a picture. Then click the pencil icon to edit your name or bio. All done! Need more help?"
+*   **NOT like this:** Never format your response with "User: How do I set up my profile?" followed by "Sade: Here's how..." Instead, respond directly to what the user asked.
 *   **Mention UI:** Refer to UI elements like buttons and icons clearly.
 
 **Handling Web Search Results:**
@@ -1064,6 +1067,21 @@ app.post('/api/sade-ai', async (req, res) => {
 *   **CRITICAL RULE 4 - NO SCRIPTING:** Do not write both sides of the conversation (e.g., User: ... Sade: ...). This is non-negotiable.
 *   **CRITICAL RULE 5 - NO PREFIXES:** NEVER start your reply with "Sade:", "Sade AI:", or similar labels. This is non-negotiable.
 *   **CRITICAL RULE 6 - BE CONCISE:** Keep replies relatively brief and natural unless deeper empathy is required by other rules. Avoid unnecessary rambling. This is non-negotiable.
+*   **CRITICAL RULE 7 - NO EXAMPLE CONVERSATIONS:** NEVER provide example conversations showing "User:" and "Sade:" exchanges. Do not include ANY text like "Example conversation:" or lines starting with "User:" or "Sade:". If explaining how a conversation might flow, describe it normally without writing out mock dialogues. This is non-negotiable.
+*   **CRITICAL RULE 8 - NO MARKDOWN FORMATTING:** Do not use markdown formatting like **bold** or *italics* in your responses unless absolutely necessary. Keep your responses clean and natural. This is non-negotiable.
+
+**Response Format Requirements (STRICT):**
+1. You MUST respond as Sade directly, not as a narrator describing what Sade would say.
+2. You MUST NOT include examples of conversations with "User:" and "Sade:" labels.
+3. You MUST NOT include any meta notes about your reasoning or approach.
+4. You MUST NOT include instructions for how to use the SideEye app formatted as example dialogues.
+5. All instructions for using the app MUST be delivered as direct explanations from Sade, not as simulated conversations.
+6. You MUST NOT include any text like "Example:" or "Example conversation:" in your response.
+7. You MUST keep your response conversational, natural, and directly address only what the user asked.
+8. You MUST NOT repeat similar phrases or sentences within the same response. Each thought should be expressed exactly once.
+9. You MUST avoid phrases like "If you have any other questions, just let me know" at the end of every message. Vary your closing remarks or omit them entirely for a more natural conversation.
+10. CRITICAL BREVITY RULE: Keep responses under 40 words whenever possible. Be extremely concise. For greetings or simple questions, use 10-20 words maximum. DO NOT list multiple steps unless specifically asked for instructions.
+11. CRITICAL EMOJI RULE: Use at most ONE emoji per response. For simple exchanges, use NO emojis at all.
 
 **Overall:** Reply as Sade naturally. Prioritize safety and ALL the specific CRITICAL rules (especially abuse handling and NO NOTES) over general conversational patterns when rules conflict.
 `;
@@ -1144,30 +1162,53 @@ app.post('/api/sade-ai', async (req, res) => {
 
             // --- POST-PROCESSING (Apply if reply exists) ---
             if (reply) {
+              // Extract contextFlags from the request body for use in processing
+              const { contextFlags = {} } = req.body;
+              
               // Remove "Sade AI:" or "Sade:" from the start
-              reply = reply.replace(/^(Sade AI:|Sade:)\\s*/i, '');
+              reply = reply.replace(/^(Sade AI:|Sade:)\s*/i, '');
 
               // Apply Slang (Consider if this should happen before or after other cleaning)
               const slangMap = [
-                { pattern: /\\bfriend\\b(?!s)/gi, replacement: 'mate' }, // Avoid friend's
-                { pattern: /\\bbro\\b/gi, replacement: 'mandem' }, // Might need context check
-                // { pattern: /\\bhello\\b/gi, replacement: 'wagwan' }, // Less aggressive replacement
-                { pattern: /\\bokay\\b/gi, replacement: 'aight' }, // Alternative
-                { pattern: /\\bvery\\b/gi, replacement: 'proper' },
-                // { pattern: /\\bhello\\b/gi, replacement: 'how far' },
-                { pattern: /\\bawesome\\b|\\bcool\\b|\\bgreat\\b/gi, replacement: 'mad' }, // Broader match for 'mad o' context
-                { pattern: /\\bno problem\\b/gi, replacement: 'no wahala' },
-                { pattern: /\\bthank you\\b|\\bthanks\\b/gi, replacement: 'cheers' },
-                { pattern: /\\bI understand\\b|\\bI get it\\b/gi, replacement: 'I dey feel you' },
-                { pattern: /\\bI'm tired\\b/gi, replacement: 'I don tire' },
-                { pattern: /\\bunderstand\?|\\bget it\?/gi, replacement: 'you get?' } // Turning questions
+                { pattern: /\bfriend\b(?!s)/gi, replacement: 'mate' }, // Avoid friend's
+                { pattern: /\bbro\b/gi, replacement: 'mandem' }, // Might need context check
+                // { pattern: /\bhello\b/gi, replacement: 'wagwan' }, // Less aggressive replacement
+                { pattern: /\bgreat\b/gi, replacement: 'peng' }, // Context check needed
+                { pattern: /\bcool\b/gi, replacement: 'peng' }, // Context check needed
+                { pattern: /\bexcited\b/gi, replacement: 'gassed' }, // Context check needed
+                { pattern: /\bamazing\b/gi, replacement: 'peng' }, // Context check needed
+                { pattern: /\bshow\b/gi, replacement: 'gyaldem' }  // Specific context only
               ];
+
+              // Only apply 50% of the time to avoid overuse
+              if (Math.random() > 0.5) {
               slangMap.forEach(({ pattern, replacement }) => {
-                // Basic check to avoid replacing within URLs or code-like structures
-                 if (!reply.match(/https?:\/\//) && !reply.match(/`[^`]+`/)) {
+                  if (Math.random() > 0.7) { // Further randomize which words get replaced
                     reply = reply.replace(pattern, replacement);
                  }
               });
+              }
+
+              // For greeting responses, check for and remove unsolicited app instructions
+              if (contextFlags?.isGreeting && !contextFlags?.isInstructionQuery) {
+                // Remove app instruction patterns that might slip through
+                const instructionPatterns = [
+                  /\b(click|tap|press|find|look)\b.*(icon|button|menu|bar|profile|setting)/gi,
+                  /\b(your profile|profile picture|status|settings)\b.*(updated|changed|modified|set)/gi,
+                  /\b(all set|all done|and that's it)\b.*(profile|picture|status|updated|ready)/gi,
+                  /\b(steps|follow these steps|here's how)\b/gi,
+                  /\b(now your profile|your status message|your settings are now)\b/gi
+                ];
+                
+                instructionPatterns.forEach(pattern => {
+                  reply = reply.replace(pattern, '');
+                });
+                
+                // Clean up any resulting empty sentences or double spaces
+                reply = reply.replace(/\.\s+\./g, '.'); // Replace ". ." with just "."
+                reply = reply.replace(/\s{2,}/g, ' ');  // Replace multiple spaces with a single space
+                reply = reply.trim();
+              }
 
               // Add Endings (Reduced chance slightly)
               const endings = [
@@ -1198,20 +1239,116 @@ app.post('/api/sade-ai', async (req, res) => {
                 .join('\n')
                 .trim();
 
+              // ENHANCED SOLUTION: Additional regex pattern to handle the "Example conversation:" pattern
+              // This will remove lines containing "Example conversation:", "Example:", and similar
+              reply = reply.replace(/.*Example\s+conversation:.*$/gim, '');
+              reply = reply.replace(/.*Example:.*$/gim, '');
+              
+              // Enhanced cleaning for conversation examples with User: and Sade: patterns
+              // This will remove entire blocks of example conversations with User: and Sade: prefixes
+              // Split into lines, process, and rejoin
+              let lines = reply.split('\n');
+              let cleanedLines = [];
+              let inExampleBlock = false;
+              
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                const lowerLine = line.toLowerCase();
+                
+                // Detect start of an example block
+                if (lowerLine.includes('**user:**') || lowerLine.match(/^\*\*user:\*\*/) || 
+                    lowerLine.match(/^user:/) || (lowerLine.includes('user:') && lowerLine.includes('sade:'))) {
+                  inExampleBlock = true;
+                  continue; // Skip this line
+                }
+                
+                // Skip lines in an example block that look like dialog
+                if (inExampleBlock && (lowerLine.match(/^\*\*sade:\*\*/) || lowerLine.match(/^sade:/) || 
+                                      lowerLine.match(/^\*\*user:\*\*/) || lowerLine.match(/^user:/))) {
+                  continue; // Skip this line
+                }
+                
+                // End of example block detection (blank line or non-dialog text)
+                if (inExampleBlock && (line === '' || (!lowerLine.includes('user:') && !lowerLine.includes('sade:')))) {
+                  inExampleBlock = false;
+                  // Still need to check if this line should be included
+                }
+                
+                // Only add lines that aren't in example blocks and don't have specific tags/formulations
+                if (!inExampleBlock) {
+                  cleanedLines.push(lines[i]);
+                }
+              }
+              
+              reply = cleanedLines.join('\n').trim();
+              
+              // Further cleanup for any remaining "If the user..." instructions
+              reply = reply.replace(/If the user.*$/gim, '');
+              reply = reply.replace(/\*\*If the user.*$/gim, '');
+              
+              // Remove lines that contain instructions about British-Nigerian slang/phrases
+              reply = reply.replace(/.*use appropriate emojis and British-Nigerian slang\/phrases.*$/gim, '');
+              reply = reply.replace(/.*British-Nigerian slang.*$/gim, '');
+              
+              // Remove instructions about maintaining conversational tone
+              reply = reply.replace(/.*maintain a warm, friendly, and conversational tone.*$/gim, '');
+
               // Remove potential model instructions/comments
-              // Note: Removing parenthesized text below might remove intended content if AI generates it.
-              // Consider refining this if needed, but the primary fix is the prompt constraints.
               reply = reply.replace(/\([^)]*\)/g, ''); // More specific removal of (...) potentially excluding Note:
               reply = reply.replace(/\\[.*?\\]/g, ''); // Remove text in square brackets
 
-              // NEW: Remove specific critical rule/note patterns, including markdown bolding
-              reply = reply.replace(/\\*\\*\\[(Note:|Critical Rule \\d+):.*?\\]\\*\\*/g, '').trim();
+              // Remove markdown formatting and notes
+              reply = reply.replace(/\*\*\[?(Note:|Critical Rule \d+):.*?\]?\*\*/g, '').trim();
+              reply = reply.replace(/\*\*(Important|Confidence):.*?($|\n)/gi, '').trim();
+              reply = reply.replace(/\*\*([^*]+)\*\*/g, '$1'); // Remove bold formatting
+              reply = reply.replace(/\*([^*]+)\*/g, '$1');     // Remove italic formatting
+              reply = reply.replace(/__([^_]+)__/g, '$1');     // Remove underline formatting
+              reply = reply.replace(/_([^_]+)_/g, '$1');       // Remove subtle emphasis
+              
+              // Catch trailing or orphaned asterisks that might remain
+              reply = reply.replace(/\*\*\s*$/g, '');        // Remove trailing ** at end of text
+              reply = reply.replace(/\*\s*$/g, '');          // Remove trailing * at end of text
+              reply = reply.replace(/\s*\*\*\s*/g, ' ');     // Replace orphaned ** with space
+              reply = reply.replace(/\s*\*\s*/g, ' ');       // Replace orphaned * with space
 
-              // NEW: Remove **Important:** annotations and similar lines
-              reply = reply.replace(/\\*\\*(Important|Confidence):.*?($|\\n)/gi, '').trim();
+              // NEW: Enforce brevity for all responses
+              const words = reply.split(/\s+/);
+              if (words.length > 50) {
+                // Find a good sentence ending within 40-50 words
+                let truncationPoint = 40;
+                while (truncationPoint < Math.min(50, words.length)) {
+                  if (words[truncationPoint].match(/[.!?]$/)) {
+                    truncationPoint++;
+                    break;
+                  }
+                  truncationPoint++;
+                }
+                reply = words.slice(0, truncationPoint).join(' ');
+              }
 
-              // Final trim and whitespace normalization
-              reply = reply.replace(/\n{2,}/g, '\n').trim();
+              // NEW: Count and limit emojis to max 1
+              const emojiRegex = /[\u{1F300}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu;
+              const emojis = reply.match(emojiRegex) || [];
+              if (emojis.length > 1) {
+                // Keep only the first emoji
+                const firstEmoji = emojis[0];
+                reply = reply.replace(emojiRegex, '');
+                
+                // Add the first emoji back at the end of the response if it doesn't already end with punctuation
+                if (reply.trim().match(/[.!?]$/)) {
+                  reply = reply.trim() + ' ' + firstEmoji;
+                } else {
+                  reply = reply.trim() + '. ' + firstEmoji;
+                }
+              }
+
+              // NEW: Remove canned closing phrases
+              reply = reply.replace(/\b(If you have any (other )?questions|need (further )?assistance|want to chat|just let me know|I'm here for you|need help with anything else)\b.*?[.!?]$/i, '');
+              reply = reply.replace(/\b(I hope this helps|All done|Hope that helps|Well done|Thank you|Sounds like)\b.*?[.!?]$/i, '');
+              reply = reply.replace(/\b(Let me know if)\b.*?[.!?]$/i, '');
+
+              // Final cleanup
+              reply = reply.trim();
 
               // --- Save interaction to Firestore --- 
               console.log(`[SadeAI] Attempting to save chat for userId: ${userId}`);
