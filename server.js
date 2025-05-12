@@ -491,16 +491,41 @@ async function performWebSearch(query) {
     if (data.items && data.items.length > 0) {
        // Format results for Mistral context
        let resultsText = `Web Search Results for "${searchQuery}":\\n`; // Use original query for context title
+       
+       // Create an array to store source links
+       const sourceLinks = [];
+       
        data.items.forEach((item, index) => {
            // Prioritize snippet, fallback to title, skip if neither exists
            const text = item.snippet || item.title;
            if (text) {
-                // Basic cleaning of snippets (remove excessive newlines/whitespace)
+               // Basic cleaning of snippets (remove excessive newlines/whitespace)
                resultsText += `${index + 1}. ${text.replace(/\\s+/g, ' ').trim()}\\n`;
+               
+               // Store link information 
+               if (item.link) {
+                   let displayTitle = item.title || 'Untitled Source';
+                   if (displayTitle.length > 60) {
+                       displayTitle = displayTitle.substring(0, 57) + '...';
+                   }
+                   
+                   sourceLinks.push({
+                       title: displayTitle,
+                       url: item.link,
+                       displayUrl: item.displayLink || new URL(item.link).hostname
+                   });
+               }
            }
        });
-       // Only return results if we actually formatted some text
-       return resultsText.trim().length > `Web Search Results for "${searchQuery}":\\n`.length ? resultsText.trim() : null;
+       
+       // Only proceed if we actually formatted some text
+       if (resultsText.trim().length > `Web Search Results for "${searchQuery}":\\n`.length) {
+           return {
+               text: resultsText.trim(),
+               sourceLinks: sourceLinks
+           };
+       }
+       return null;
     } else {
        console.log("[Backend] Web search returned no results.");
        return null;
@@ -713,7 +738,7 @@ app.post('/api/sade-ai', async (req, res) => {
         const searchResults = await performWebSearch(message);
         if (searchResults) {
             // Store results, don't modify message directly yet
-            webSearchResultsContext = searchResults;
+            webSearchResultsContext = searchResults.text;
             searchPerformed = true;
             console.log("[SadeAI] Web search results obtained (forced).");
         } else {
@@ -740,7 +765,7 @@ app.post('/api/sade-ai', async (req, res) => {
                 const searchResults = await performWebSearch(message);
                 if (searchResults) {
                     // Store results, don't modify message directly yet
-                    webSearchResultsContext = searchResults;
+                    webSearchResultsContext = searchResults.text;
                     searchPerformed = true;
                     console.log("[SadeAI] Web search results obtained (informational).");
                 } else {
@@ -1390,9 +1415,27 @@ app.post('/api/sade-ai', async (req, res) => {
                    // Don't crash the response, just log the save error
               }
 
+              // Save the sourceLinks from the search results
+              let sourceLinks = null;
+              if (searchPerformed) {
+                // Re-run the search to get the links (since we only stored the text earlier)
+                // This is not the most efficient but ensures we have the links
+                const searchResultsWithLinks = await performWebSearch(message);
+                if (searchResultsWithLinks && searchResultsWithLinks.sourceLinks) {
+                  sourceLinks = searchResultsWithLinks.sourceLinks;
+                }
+              }
+
               // Send the final reply
               if (reply) {
-                  res.json({ response: reply });
+                  const responseObj = { response: reply };
+                  
+                  // Include sourceLinks in the response if available
+                  if (sourceLinks && sourceLinks.length > 0) {
+                      responseObj.sourceLinks = sourceLinks;
+                  }
+                  
+                  res.json(responseObj);
               } else {
                   // If cleaning resulted in empty reply, send a fallback
                   res.json({ response: "Hmm, I'm not sure what to say to that right now, mate." });
