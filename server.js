@@ -1338,10 +1338,10 @@ app.post('/api/sade-ai', async (req, res) => {
 
               // NEW: Enforce brevity for all responses
               const words = reply.split(/\s+/);
-              if (words.length > 50) {
-                // Find a good sentence ending within 40-50 words
-                let truncationPoint = 40;
-                while (truncationPoint < Math.min(50, words.length)) {
+              if (words.length > 150) { // changed from 100 to 150
+                // Find a good sentence ending within 100 - 150 words
+                let truncationPoint = 100; // changed from 50 to 100
+                while (truncationPoint < Math.min(150, words.length)) { // changed from 100 to 150
                   if (words[truncationPoint].match(/[.!?]$/)) {
                     truncationPoint++;
                     break;
