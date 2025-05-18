@@ -378,6 +378,51 @@ const GISTS_PROVERBS = [
   "Cheeky fact: The Queen has two birthdays. Lucky her, eh?",
 ];
 
+// Track users who just submitted a report (in-memory map)
+// Map<userId, {reportId: string, timestamp: number}>
+const activeReportFollowups = new Map();
+
+// Track users in the report creation flow (in-memory map)
+// Map<userId, {step: 'type' | 'details', reportType?: string, timestamp: number}>
+const activeReportFlows = new Map();
+
+// Report types that match the formal reporting UI
+const REPORT_TYPES = [
+  { value: 'user', label: 'Report a User (Harassment, Abuse, etc.)' },
+  { value: 'bug', label: 'Report a Bug or Technical Issue' },
+  { value: 'content', label: 'Report Inappropriate Content' },
+  { value: 'harassment', label: 'Harassment' },
+  { value: 'hate_speech', label: 'Hate Speech' },
+  { value: 'other', label: 'Other Issue' }
+];
+
+// Cleanup interval for expired report states (runs every 30 minutes)
+setInterval(() => {
+  const now = Date.now();
+  let expiredFollowupsCount = 0;
+  let expiredFlowsCount = 0;
+  
+  // Clean up report followups
+  activeReportFollowups.forEach((data, userId) => {
+    if (data.expiresAt < now) {
+      activeReportFollowups.delete(userId);
+      expiredFollowupsCount++;
+    }
+  });
+  
+  // Clean up report creation flows
+  activeReportFlows.forEach((data, userId) => {
+    if (data.expiresAt < now) {
+      activeReportFlows.delete(userId);
+      expiredFlowsCount++;
+    }
+  });
+  
+  if (expiredFollowupsCount > 0 || expiredFlowsCount > 0) {
+    console.log(`[SadeAI] Cleaned up ${expiredFollowupsCount} expired report follow-ups and ${expiredFlowsCount} expired report flows`);
+  }
+}, 30 * 60 * 1000); // 30 minutes
+
 const SLANG_EXPLANATIONS = {
   'wagwan': "It's like saying 'what's going on?' or 'how are you?', proper chill greeting.",
   'innit': "You know? Short for 'isn't it?', we use it loads at the end of sentences.",
@@ -680,6 +725,156 @@ app.post('/api/sade-ai', async (req, res) => {
     let searchPerformed = false;
     let responseSent = false; // Flag to prevent multiple responses
 
+    // --- Check for Report Follow-Up ---
+    const activeReport = activeReportFollowups.get(userId);
+    if (activeReport && activeReport.expiresAt > Date.now()) {
+      try {
+        console.log(`[SadeAI] Processing follow-up for report ${activeReport.reportId} from user ${userId}`);
+        console.log(`[SadeAI] Follow-up message content: "${message}"`);
+        
+        // Check for specific issue types in the follow-up message
+        const lowerCaseFollowUp = message.toLowerCase();
+        let issueType = null;
+        
+        if (lowerCaseFollowUp.includes('racial') || lowerCaseFollowUp.includes('race') || lowerCaseFollowUp.includes('racism')) {
+          issueType = 'racial_issue';
+        } else if (lowerCaseFollowUp.includes('harass') || lowerCaseFollowUp.includes('stalk')) {
+          issueType = 'harassment';
+        } else if (lowerCaseFollowUp.includes('threat') || lowerCaseFollowUp.includes('danger')) {
+          issueType = 'threat';
+        } else if (lowerCaseFollowUp.includes('bug') || lowerCaseFollowUp.includes('glitch') || lowerCaseFollowUp.includes('not working')) {
+          issueType = 'technical_issue';
+        }
+        
+        // Update the existing report with the follow-up message and issue type if detected
+        const reportRef = db.collection('userReports').doc(activeReport.reportId);
+        const updateData = {
+          followUpMessages: FieldValue.arrayUnion({
+            content: message,
+            timestamp: FieldValue.serverTimestamp()
+          })
+        };
+        
+        // Add the issue type if detected
+        if (issueType) {
+          updateData.issueType = issueType;
+          updateData.priority = (issueType === 'racial_issue' || issueType === 'harassment' || issueType === 'threat') ? 'high' : 'normal';
+          console.log(`[SadeAI] Detected issue type: ${issueType}, setting priority: ${updateData.priority}`);
+        }
+        
+        await reportRef.update(updateData);
+        
+        // Clear the follow-up state after the user has provided additional info
+        activeReportFollowups.delete(userId);
+        console.log(`[SadeAI] Stored follow-up message and cleared follow-up state for user ${userId}`);
+        
+        // Respond to the user with appropriate message based on issue type
+        let response = "Thank you for sharing that information. I've added these details to your report. Our team takes these matters very seriously and will review this as a priority.";
+        
+        if (issueType === 'racial_issue' || issueType === 'harassment' || issueType === 'threat') {
+          response += " I'm sorry you've experienced this. Everyone deserves to be treated with respect.";
+        }
+        
+        res.json({ response });
+        responseSent = true;
+        return; // Exit early to ensure no other handlers process this message
+      } catch (error) {
+        console.error(`[SadeAI] Error updating report with follow-up:`, error);
+        // Don't set responseSent to true so it can fall through to normal handling
+      }
+    }
+    
+    // --- Check for Active Report Flow ---
+    const activeFlow = activeReportFlows.get(userId);
+    if (activeFlow && activeFlow.expiresAt > Date.now()) {
+      console.log(`[SadeAI] Processing report flow step ${activeFlow.step} for user ${userId}`);
+      
+      if (activeFlow.step === 'type') {
+        // User is responding with the report type
+        const selectedType = message.toLowerCase();
+        let matchedType = null;
+        
+        // Try to match user input to a report type
+        for (const type of REPORT_TYPES) {
+          if (selectedType.includes(type.value.toLowerCase()) || 
+              selectedType.includes(type.label.toLowerCase())) {
+            matchedType = type.value;
+            break;
+          }
+        }
+        
+        // If we couldn't match to a type, default to 'other'
+        if (!matchedType) {
+          if (selectedType.includes('1')) matchedType = 'user';
+          else if (selectedType.includes('2')) matchedType = 'bug';
+          else if (selectedType.includes('3')) matchedType = 'content';
+          else if (selectedType.includes('4')) matchedType = 'harassment';
+          else if (selectedType.includes('5')) matchedType = 'hate_speech';
+          else matchedType = 'other';
+        }
+        
+        // Update the flow state to collect details next
+        activeReportFlows.set(userId, {
+          step: 'details',
+          reportType: matchedType,
+          timestamp: Date.now(),
+          expiresAt: Date.now() + (10 * 60 * 1000) // 10 minutes
+        });
+        
+        console.log(`[SadeAI] User selected report type: ${matchedType}`);
+        
+        // Ask for details based on the report type
+        let response = '';
+        if (matchedType === 'user') {
+          response = "Could you please provide the username of the person you're reporting, as well as what happened?";
+        } else if (matchedType === 'bug') {
+          response = "Could you please describe the technical issue you're experiencing in detail? What were you trying to do when it occurred?";
+        } else {
+          response = "Could you please describe what happened in as much detail as possible?";
+        }
+        
+        res.json({ response });
+        responseSent = true;
+        return;
+      } 
+      else if (activeFlow.step === 'details') {
+        // User is providing details, create the actual report
+        try {
+          console.log(`[SadeAI] Creating report of type ${activeFlow.reportType} with details: "${message}"`);
+          
+          // Create the report document
+          const reportRef = await db.collection('userReports').add({
+            userId: userId,
+            reportType: activeFlow.reportType,
+            reportContent: message,
+            timestamp: FieldValue.serverTimestamp(),
+            status: 'new'
+          });
+          
+          // Clear the flow state
+          activeReportFlows.delete(userId);
+          
+          // Set follow-up state to collect additional info if needed
+          activeReportFollowups.set(userId, {
+            reportId: reportRef.id,
+            timestamp: Date.now(),
+            expiresAt: Date.now() + (10 * 60 * 1000) // 10 minutes
+          });
+          
+          console.log(`[SadeAI] Report created with ID: ${reportRef.id}, now awaiting follow-up`);
+          
+          // Respond to user
+          const response = "Thank you for providing those details. I've created a report that our team will review. Is there anything else you'd like to add about this issue?";
+          res.json({ response });
+          responseSent = true;
+          return;
+        } catch (error) {
+          console.error(`[SadeAI] Error creating report:`, error);
+          // Fall through to regular handling if there's an error
+        }
+      }
+    }
+    
     // --- Specific Question Checks (Hardcoded Responses) ---
     const lowerCaseMsg = message.toLowerCase();
 
@@ -992,10 +1187,36 @@ app.post('/api/sade-ai', async (req, res) => {
         
         // 6. Handle Reporting Queries
         else if (['report', 'issue', 'problem', 'abuse', 'harassment', 'bullying', 'unsafe'].some(keyword => lowerCaseMessage.includes(keyword)) && !lowerCaseMessage.includes('play')) {
-             console.log("[SadeAI] Reporting query detected.");
-             const response = "Hearing you loud and clear. If you need to report a user, bug, or any other issue, the best way is to click the three lines at the top of the page, then click Settings, scroll down and find the 'Report an Issue' option.That page will guide you through the steps. Stay safe, yeah? ✨";
-             res.json({ response });
-             responseSent = true;
+            console.log("[SadeAI] Reporting query detected.");
+            console.log(`[SadeAI] User message: "${message}"`);
+            
+            // Start the report flow instead of immediately creating a report
+            try {
+                // Initialize the report flow with the first step (selecting report type)
+                activeReportFlows.set(userId, {
+                    step: 'type',
+                    timestamp: Date.now(),
+                    expiresAt: Date.now() + (10 * 60 * 1000) // 10 minutes
+                });
+                
+                console.log(`[SadeAI] Started report flow for user ${userId}`);
+                
+                // Format report type options for display
+                const typeOptions = REPORT_TYPES.map((type, index) => 
+                    `${index + 1}. ${type.label}`
+                ).join('\n');
+                
+                // Ask user to select a report type
+                const response = `I'd like to help you report this issue. What type of report would you like to make?\n\n${typeOptions}\n\nPlease choose one by number or description.`;
+                res.json({ response });
+            } catch (error) {
+                console.error(`[SadeAI] Error starting report flow:`, error);
+                // Fallback response if there's an error
+                const response = "I'm having trouble processing your report right now. Please try again or use the report option in Settings instead.";
+                res.json({ response });
+            }
+            
+            responseSent = true;
         }
     }
 
