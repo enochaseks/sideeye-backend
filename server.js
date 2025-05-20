@@ -703,6 +703,40 @@ function formatBoardToString(board) {
 
 // --- End Connect 4 Game Helpers ---
 
+// Add language detection function
+const detectLanguage = (text) => {
+  // Common words and phrases in different languages
+  const languagePatterns = {
+    yoruba: [
+      /\b(bawo|dara|e|o|se|wa|ni|ti|ko|mo|mi|re|wa|won|yin|won|ti|ko|mo|mi|re|wa|won|yin|won)\b/i,
+      /\b(eku|eku odun|eku ile|eku aaro|eku ale|eku ojo|eku osan|eku oru)\b/i,
+      /\b(pele|pele o|pele e|pele oo|pele eo)\b/i
+    ],
+    igbo: [
+      /\b(kedu|nno|daalu|biko|nna|nne|nwanne|nwoke|nwaanyi|nwa|nwata|nwoke|nwaanyi)\b/i,
+      /\b(ka|ka chi|ka o di|ka o di mma|ka o di nma|ka o di nma o|ka o di nma e)\b/i
+    ],
+    twi: [
+      /\b(wo|me|ye|yɛ|ɛ|ɔ|a|e|i|o|u|n|m|ŋ|h|w|y|r|l|k|g|t|d|n|p|b|m|f|v|s|z|ʃ|ʒ|h|w|y|r|l)\b/i,
+      /\b(ɛte sɛn|ɛte sɛn na|ɛte sɛn na ɛ|ɛte sɛn na ɛ|ɛte sɛn na ɛ|ɛte sɛn na ɛ)\b/i
+    ],
+    afemai: [
+      /\b(oghene|oghene o|oghene e|oghene oo|oghene eo)\b/i,
+      /\b(oghene o|oghene e|oghene oo|oghene eo)\b/i
+    ]
+  };
+
+  // Check each language's patterns
+  for (const [lang, patterns] of Object.entries(languagePatterns)) {
+    if (patterns.some(pattern => pattern.test(text))) {
+      return lang;
+    }
+  }
+
+  // Default to English if no other language is detected
+  return 'english';
+};
+
 // Sade AI endpoint (NO NEED for app.options here again, handled above)
 app.post('/api/sade-ai', async (req, res) => {
   console.log("--- Sade AI Handler Entered ---");
@@ -1428,11 +1462,69 @@ app.post('/api/sade-ai', async (req, res) => {
 
               // Only apply 50% of the time to avoid overuse
               if (Math.random() > 0.5) {
-              slangMap.forEach(({ pattern, replacement }) => {
+                slangMap.forEach(({ pattern, replacement }) => {
                   if (Math.random() > 0.7) { // Further randomize which words get replaced
                     reply = reply.replace(pattern, replacement);
-                 }
-              });
+                  }
+                });
+              }
+
+              // Apply language-specific responses
+              const detectedLang = detectLanguage(message);
+              const languageResponses = {
+                yoruba: {
+                  greeting: "Bawo ni!",
+                  ending: "O dara!",
+                  slang: [
+                    { pattern: /\bhello\b/gi, replacement: 'Bawo ni' },
+                    { pattern: /\bgoodbye\b/gi, replacement: 'O dabọ' },
+                    { pattern: /\bthank you\b/gi, replacement: 'E se' }
+                  ]
+                },
+                igbo: {
+                  greeting: "Kedu!",
+                  ending: "Daalu!",
+                  slang: [
+                    { pattern: /\bhello\b/gi, replacement: 'Kedu' },
+                    { pattern: /\bgoodbye\b/gi, replacement: 'Ka ọ dị' },
+                    { pattern: /\bthank you\b/gi, replacement: 'Daalu' }
+                  ]
+                },
+                twi: {
+                  greeting: "Ɛte sɛn!",
+                  ending: "Yɛbɛhyia bio!",
+                  slang: [
+                    { pattern: /\bhello\b/gi, replacement: 'Ɛte sɛn' },
+                    { pattern: /\bgoodbye\b/gi, replacement: 'Yɛbɛhyia bio' },
+                    { pattern: /\bthank you\b/gi, replacement: 'Medaase' }
+                  ]
+                },
+                afemai: {
+                  greeting: "Oghene!",
+                  ending: "O ghene!",
+                  slang: [
+                    { pattern: /\bhello\b/gi, replacement: 'Oghene' },
+                    { pattern: /\bgoodbye\b/gi, replacement: 'O ghene' },
+                    { pattern: /\bthank you\b/gi, replacement: 'O ghene' }
+                  ]
+                }
+              };
+
+              // Apply language-specific slang if detected
+              if (detectedLang !== 'english' && languageResponses[detectedLang]) {
+                const langConfig = languageResponses[detectedLang];
+                
+                // Apply language-specific slang
+                langConfig.slang.forEach(({ pattern, replacement }) => {
+                  if (Math.random() > 0.7) { // 30% chance to apply each replacement
+                    reply = reply.replace(pattern, replacement);
+                  }
+                });
+
+                // Add language-specific ending with 20% chance
+                if (Math.random() < 0.2) {
+                  reply += " " + langConfig.ending;
+                }
               }
 
               // For greeting responses, check for and remove unsolicited app instructions
