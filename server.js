@@ -394,6 +394,97 @@ app.get('/api/process-gift-payment', (req, res) => {
   });
 });
 
+// MOVED: Real gift payment endpoint - processes actual payments
+app.post('/api/process-gift-payment', async (req, res) => {
+    try {
+        const {
+            giftId,
+            giftName,
+            amount, // Amount in GBP (e.g., 0.50 for 50p)
+            senderId,
+            senderName,
+            receiverId,
+            roomId,
+            paymentMethod,
+            paymentDetails,
+            customerEmail
+        } = req.body;
+
+        console.log('[Gift Payment] Processing real gift payment:', {
+            giftId,
+            giftName,
+            amount,
+            senderId,
+            receiverId,
+            roomId,
+            paymentMethod
+        });
+
+        // Validate required fields
+        if (!giftId || !giftName || !amount || !senderId || !receiverId || !roomId || !paymentMethod) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required payment information'
+            });
+        }
+
+        // Validate payment amount
+        if (amount < 0.50 || amount > 100) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid payment amount'
+            });
+        }
+
+        // Process payment - simplified approach
+        const paymentId = `gift_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        // For now, just process the gift directly since browser handles payment
+        // In production, you'd validate the payment token here
+        const paymentResult = {
+            success: true,
+            paymentId: paymentId,
+            transactionId: paymentId
+        };
+
+        if (!paymentResult.success) {
+            return res.status(400).json({
+                success: false,
+                error: paymentResult.error || 'Payment processing failed'
+            });
+        }
+
+        // Only process gift if payment was successful
+        await processGiftPaymentSuccess({
+            giftId,
+            giftName,
+            senderId,
+            senderName,
+            receiverId,
+            roomId,
+            amount,
+            currency: 'GBP',
+            paymentId: paymentResult.paymentId || paymentId,
+            paymentMethod,
+            transactionId: paymentResult.transactionId,
+            customerEmail: customerEmail
+        });
+
+        res.json({
+            success: true,
+            message: 'Payment processed and gift sent successfully!',
+            paymentId: paymentResult.paymentId || paymentId
+        });
+
+    } catch (error) {
+        console.error('[Gift Payment] Error processing payment:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Payment processing failed. Please try again.'
+        });
+    }
+});
+
 // Image upload endpoint
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   try {
@@ -2641,97 +2732,7 @@ app.get('/api/deployment-test', (req, res) => {
     });
 });
 
-// Real gift payment endpoint - processes actual payments
-// Updated: Force Railway deployment
-app.post('/api/process-gift-payment', async (req, res) => {
-    try {
-        const {
-            giftId,
-            giftName,
-            amount, // Amount in GBP (e.g., 0.50 for 50p)
-            senderId,
-            senderName,
-            receiverId,
-            roomId,
-            paymentMethod,
-            paymentDetails,
-            customerEmail
-        } = req.body;
-
-        console.log('[Gift Payment] Processing real gift payment:', {
-            giftId,
-            giftName,
-            amount,
-            senderId,
-            receiverId,
-            roomId,
-            paymentMethod
-        });
-
-        // Validate required fields
-        if (!giftId || !giftName || !amount || !senderId || !receiverId || !roomId || !paymentMethod) {
-            return res.status(400).json({
-                success: false,
-                error: 'Missing required payment information'
-            });
-        }
-
-        // Validate payment amount
-        if (amount < 0.50 || amount > 100) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid payment amount'
-            });
-        }
-
-        // Process payment - simplified approach
-        const paymentId = `gift_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        
-        // For now, just process the gift directly since browser handles payment
-        // In production, you'd validate the payment token here
-        const paymentResult = {
-            success: true,
-            paymentId: paymentId,
-            transactionId: paymentId
-        };
-
-        if (!paymentResult.success) {
-            return res.status(400).json({
-                success: false,
-                error: paymentResult.error || 'Payment processing failed'
-            });
-        }
-
-        // Only process gift if payment was successful
-        await processGiftPaymentSuccess({
-            giftId,
-            giftName,
-            senderId,
-            senderName,
-            receiverId,
-            roomId,
-            amount,
-            currency: 'GBP',
-            paymentId: paymentResult.paymentId || paymentId,
-            paymentMethod,
-            transactionId: paymentResult.transactionId,
-            customerEmail: customerEmail
-        });
-
-        res.json({
-            success: true,
-            message: 'Payment processed and gift sent successfully!',
-            paymentId: paymentResult.paymentId || paymentId
-        });
-
-    } catch (error) {
-        console.error('[Gift Payment] Error processing payment:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Payment processing failed. Please try again.'
-        });
-    }
-});
+// OLD payment endpoint removed - moved to earlier in file
 
 // Stripe payment processing function
 async function processStripePayment(paymentData) {
