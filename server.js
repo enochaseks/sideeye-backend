@@ -376,6 +376,15 @@ app.get('/api/deployment-status', (req, res) => {
   });
 });
 
+// Test endpoint specifically for payment route
+app.get('/api/payment-test', (req, res) => {
+  res.json({ 
+    message: 'Payment route is accessible!',
+    timestamp: new Date().toISOString(),
+    paymentEndpointExists: true
+  });
+});
+
 // Image upload endpoint
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   try {
