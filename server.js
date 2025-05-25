@@ -2576,6 +2576,15 @@ app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
   res.status(200).json({ status: 'event received' });
 });
 
+// Test endpoint to verify deployment
+app.get('/api/deployment-test', (req, res) => {
+    res.json({ 
+        message: 'Latest deployment active', 
+        timestamp: new Date().toISOString(),
+        version: '2.0.0'
+    });
+});
+
 // Add payment processing endpoint for gifts
 app.post('/api/process-gift-payment', async (req, res) => {
     try {
