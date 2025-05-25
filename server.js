@@ -14,6 +14,19 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { FieldValue } = require('firebase-admin/firestore');
 
+// Initialize Stripe
+let stripe;
+try {
+  if (process.env.STRIPE_SECRET_KEY) {
+    stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    console.log('Stripe initialized successfully');
+  } else {
+    console.warn('Stripe Secret Key not found - payment features will be disabled');
+  }
+} catch (error) {
+  console.error('Error initializing Stripe:', error);
+}
+
 // Load .env file ONLY if not in production
 if (process.env.NODE_ENV !== 'production') {
   const dotenvResult = require('dotenv').config();
@@ -810,8 +823,7 @@ app.post('/api/sade-ai', async (req, res) => {
         }
         
         res.json({ response });
-        responseSent = true;
-        return; // Exit early to ensure no other handlers process this message
+        responseSent = true; // Exit early to ensure no other handlers process this message
       } catch (error) {
         console.error(`[SadeAI] Error updating report with follow-up:`, error);
         // Don't set responseSent to true so it can fall through to normal handling
@@ -1462,11 +1474,11 @@ app.post('/api/sade-ai', async (req, res) => {
 
               // Only apply 50% of the time to avoid overuse
               if (Math.random() > 0.5) {
-                slangMap.forEach(({ pattern, replacement }) => {
+              slangMap.forEach(({ pattern, replacement }) => {
                   if (Math.random() > 0.7) { // Further randomize which words get replaced
                     reply = reply.replace(pattern, replacement);
-                  }
-                });
+                 }
+              });
               }
 
               // Apply language-specific responses
@@ -2520,4 +2532,607 @@ app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
 
 // Log at the very end of the script
 console.log('[SERVER END SCRIPT] server.js script fully parsed.');
+
+// Add payment processing endpoint for gifts
+app.post('/api/process-gift-payment', async (req, res) => {
+    try {
+        const {
+            giftId,
+            giftName,
+            amount, // Amount in smallest currency unit (pence, cents, etc.)
+            currency,
+            paymentMethod,
+            senderId,
+            senderName,
+            receiverId,
+            roomId,
+            country
+        } = req.body;
+
+        console.log('[Gift Payment] Processing payment:', {
+            giftId,
+            giftName,
+            amount,
+            currency,
+            paymentMethod,
+            senderId,
+            receiverId,
+            roomId,
+            country
+        });
+
+        let paymentResult;
+
+        // Get user email for receipt
+        let userEmail = null;
+        try {
+            const userRecord = await admin.auth().getUser(senderId);
+            userEmail = userRecord.email;
+        } catch (error) {
+            console.warn('[Gift Payment] Could not get user email:', error.message);
+        }
+
+        switch (paymentMethod) {
+            case 'stripe':
+                // Use Stripe Checkout for card payments with receipt
+                paymentResult = await createStripeCheckoutSession({
+                    amount,
+                    currency,
+                    description: `Gift: ${giftName}`,
+                    giftName,
+                    customer_email: userEmail,
+                    metadata: {
+                        giftId,
+                        senderId,
+                        receiverId,
+                        roomId,
+                        type: 'gift_payment'
+                    }
+                });
+                break;
+
+            case 'google_pay':
+                // Google Pay uses Stripe Payment Intent
+                paymentResult = await processStripePayment({
+                    amount,
+                    currency,
+                    description: `Gift: ${giftName} (Google Pay)`,
+                    payment_method_types: ['card'],
+                    receipt_email: userEmail,
+                    metadata: {
+                        giftId,
+                        senderId,
+                        receiverId,
+                        roomId,
+                        type: 'gift_payment',
+                        method: 'google_pay'
+                    }
+                });
+                break;
+
+            case 'apple_pay':
+                // Apple Pay uses Stripe Payment Intent
+                paymentResult = await processStripePayment({
+                    amount,
+                    currency,
+                    description: `Gift: ${giftName} (Apple Pay)`,
+                    payment_method_types: ['card'],
+                    receipt_email: userEmail,
+                    metadata: {
+                        giftId,
+                        senderId,
+                        receiverId,
+                        roomId,
+                        type: 'gift_payment',
+                        method: 'apple_pay'
+                    }
+                });
+                break;
+
+            case 'flutterwave':
+                paymentResult = await processFlutterwavePayment({
+                    amount,
+                    currency,
+                    email: userEmail || `user_${senderId}@sideeye.app`,
+                    phone_number: '', // Optional
+                    name: senderName,
+                    title: `Gift: ${giftName}`,
+                    description: `Sending ${giftName} gift in SideEye room`,
+                    redirect_url: `${process.env.FRONTEND_URL}/payment-success`,
+                    meta: {
+                        giftId,
+                        senderId,
+                        receiverId,
+                        roomId,
+                        type: 'gift_payment'
+                    }
+                });
+                break;
+
+            default:
+                throw new Error(`Unsupported payment method: ${paymentMethod}`);
+        }
+
+        if (paymentResult.success) {
+            // Log the successful payment
+            console.log('[Gift Payment] Payment initiated:', paymentResult.paymentId || paymentResult.sessionId);
+
+            const response = {
+                success: true,
+                message: 'Payment initiated successfully'
+            };
+
+            // Add appropriate response data based on payment method
+            if (paymentMethod === 'stripe') {
+                response.checkoutUrl = paymentResult.checkoutUrl;
+                response.sessionId = paymentResult.sessionId;
+            } else if (paymentMethod === 'flutterwave') {
+                response.paymentUrl = paymentResult.paymentUrl;
+                response.paymentId = paymentResult.paymentId;
+            } else {
+                response.clientSecret = paymentResult.clientSecret;
+                response.paymentId = paymentResult.paymentId;
+                response.requiresAction = paymentResult.requiresAction;
+            }
+
+            res.json(response);
+        } else {
+            throw new Error(paymentResult.error || 'Payment failed');
+        }
+
+    } catch (error) {
+        console.error('[Gift Payment] Error processing payment:', error);
+        res.status(400).json({
+            success: false,
+            error: error.message || 'Payment processing failed'
+        });
+    }
+});
+
+// Stripe payment processing function
+async function processStripePayment(paymentData) {
+    try {
+        if (!stripe) {
+            throw new Error('Stripe not configured');
+        }
+
+        // Create payment intent for card payments
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: paymentData.amount,
+            currency: paymentData.currency.toLowerCase(),
+            description: paymentData.description,
+            metadata: paymentData.metadata || {},
+            payment_method_types: paymentData.payment_method_types || ['card'],
+            automatic_payment_methods: {
+                enabled: true,
+                allow_redirects: 'never'
+            },
+            receipt_email: paymentData.receipt_email || null
+        });
+
+        return {
+            success: true,
+            paymentId: paymentIntent.id,
+            clientSecret: paymentIntent.client_secret,
+            requiresAction: paymentIntent.status === 'requires_action',
+            status: paymentIntent.status
+        };
+    } catch (error) {
+        console.error('[Stripe Payment] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Create Stripe checkout session for card payments
+async function createStripeCheckoutSession(paymentData) {
+    try {
+        if (!stripe) {
+            throw new Error('Stripe not configured');
+        }
+
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [{
+                price_data: {
+                    currency: paymentData.currency.toLowerCase(),
+                    product_data: {
+                        name: paymentData.description,
+                        description: `SideEye Gift: ${paymentData.giftName}`,
+                        images: ['https://sideeye.uk/logo.png']
+                    },
+                    unit_amount: paymentData.amount,
+                },
+                quantity: 1,
+            }],
+            mode: 'payment',
+            success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${process.env.FRONTEND_URL}/payment-cancelled`,
+            metadata: paymentData.metadata || {},
+            customer_email: paymentData.customer_email || null,
+            billing_address_collection: 'required'
+        });
+
+        return {
+            success: true,
+            sessionId: session.id,
+            checkoutUrl: session.url
+        };
+    } catch (error) {
+        console.error('[Stripe Checkout] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Flutterwave payment processing function
+async function processFlutterwavePayment(paymentData) {
+    try {
+        if (!process.env.FLUTTERWAVE_SECRET_KEY) {
+            throw new Error('Flutterwave not configured');
+        }
+
+        const payload = {
+            tx_ref: `gift_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            amount: paymentData.amount / 100, // Flutterwave expects amount in main currency unit
+            currency: paymentData.currency,
+            redirect_url: paymentData.redirect_url,
+            customer: {
+                email: paymentData.email,
+                phone_number: paymentData.phone_number,
+                name: paymentData.name
+            },
+            customizations: {
+                title: paymentData.title,
+                description: paymentData.description,
+                logo: `${process.env.FRONTEND_URL}/logo.png`
+            },
+            meta: paymentData.meta
+        };
+
+        const response = await fetch('https://api.flutterwave.com/v3/payments', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        const result = await response.json();
+
+        if (result.status === 'success') {
+            return {
+                success: true,
+                paymentId: result.data.id,
+                paymentUrl: result.data.link
+            };
+        } else {
+            throw new Error(result.message || 'Flutterwave payment failed');
+        }
+    } catch (error) {
+        console.error('[Flutterwave Payment] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Stripe webhook endpoint for payment confirmations
+app.post('/api/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    try {
+        if (!process.env.STRIPE_WEBHOOK_SECRET) {
+            throw new Error('Stripe webhook secret not configured');
+        }
+
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+        console.error('[Stripe Webhook] Signature verification failed:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    console.log('[Stripe Webhook] Event received:', event.type);
+
+    try {
+        switch (event.type) {
+            case 'checkout.session.completed':
+                await handleStripeCheckoutCompleted(event.data.object);
+                break;
+            case 'payment_intent.succeeded':
+                await handleStripePaymentSucceeded(event.data.object);
+                break;
+            case 'payment_intent.payment_failed':
+                await handleStripePaymentFailed(event.data.object);
+                break;
+            default:
+                console.log(`[Stripe Webhook] Unhandled event type: ${event.type}`);
+        }
+
+        res.json({received: true});
+    } catch (error) {
+        console.error('[Stripe Webhook] Error processing webhook:', error);
+        res.status(500).json({error: 'Webhook processing failed'});
+    }
+});
+
+// Handle successful Stripe checkout
+async function handleStripeCheckoutCompleted(session) {
+    console.log('[Stripe Webhook] Checkout completed:', session.id);
+    
+    try {
+        const metadata = session.metadata;
+        if (metadata && metadata.type === 'gift_payment') {
+            await processGiftPaymentSuccess({
+                paymentId: session.id,
+                giftId: metadata.giftId,
+                senderId: metadata.senderId,
+                receiverId: metadata.receiverId,
+                roomId: metadata.roomId,
+                amount: session.amount_total / 100, // Convert from cents
+                currency: session.currency.toUpperCase(),
+                customerEmail: session.customer_details?.email
+            });
+        }
+    } catch (error) {
+        console.error('[Stripe Webhook] Error processing checkout completion:', error);
+    }
+}
+
+// Handle successful Stripe payment intent
+async function handleStripePaymentSucceeded(paymentIntent) {
+    console.log('[Stripe Webhook] Payment succeeded:', paymentIntent.id);
+    
+    try {
+        const metadata = paymentIntent.metadata;
+        if (metadata && metadata.type === 'gift_payment') {
+            await processGiftPaymentSuccess({
+                paymentId: paymentIntent.id,
+                giftId: metadata.giftId,
+                senderId: metadata.senderId,
+                receiverId: metadata.receiverId,
+                roomId: metadata.roomId,
+                amount: paymentIntent.amount / 100, // Convert from cents
+                currency: paymentIntent.currency.toUpperCase(),
+                customerEmail: paymentIntent.receipt_email
+            });
+        }
+    } catch (error) {
+        console.error('[Stripe Webhook] Error processing payment success:', error);
+    }
+}
+
+// Handle failed Stripe payment
+async function handleStripePaymentFailed(paymentIntent) {
+    console.log('[Stripe Webhook] Payment failed:', paymentIntent.id);
+    // You can add logic here to handle failed payments if needed
+}
+
+// Process successful gift payment
+async function processGiftPaymentSuccess(paymentData) {
+    try {
+        console.log('[Gift Payment Success] Processing:', paymentData);
+
+        // Add gift to Firestore
+        const giftRef = db.collection('sideRooms').doc(paymentData.roomId).collection('gifts').doc();
+        await giftRef.set({
+            giftId: paymentData.giftId,
+            giftType: 'premium', // All paid gifts are premium
+            giftName: getGiftNameById(paymentData.giftId),
+            senderId: paymentData.senderId,
+            senderName: await getUserDisplayName(paymentData.senderId),
+            receiverId: paymentData.receiverId,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            value: paymentData.amount,
+            cost: paymentData.amount,
+            currency: paymentData.currency,
+            paymentId: paymentData.paymentId,
+            status: 'completed'
+        });
+
+        // Calculate host earnings (80% of gift cost in SC)
+        const hostEarningInSC = (paymentData.amount * 0.8) / 0.005; // Convert to SideCoins
+        
+        // Update host's balance
+        const hostRef = db.collection('users').doc(paymentData.receiverId);
+        await hostRef.update({
+            sideCoins: admin.firestore.FieldValue.increment(hostEarningInSC),
+            giftCount: admin.firestore.FieldValue.increment(1),
+            giftValue: admin.firestore.FieldValue.increment(paymentData.amount)
+        });
+
+        // Send receipt email if email is available
+        if (paymentData.customerEmail) {
+            await sendGiftReceipt({
+                email: paymentData.customerEmail,
+                giftName: getGiftNameById(paymentData.giftId),
+                amount: paymentData.amount,
+                currency: paymentData.currency,
+                paymentId: paymentData.paymentId,
+                hostName: await getUserDisplayName(paymentData.receiverId)
+            });
+        }
+
+        console.log('[Gift Payment Success] Processed successfully');
+    } catch (error) {
+        console.error('[Gift Payment Success] Error:', error);
+    }
+}
+
+// Helper function to get gift name by ID
+function getGiftNameById(giftId) {
+    const giftNames = {
+        'heart-gift': 'Heart',
+        'side-eye-gift': 'Side Eye',
+        'confetti-gift': 'Confetti',
+        'crown-gift': 'Crown'
+    };
+    return giftNames[giftId] || 'Unknown Gift';
+}
+
+// Helper function to get user display name
+async function getUserDisplayName(userId) {
+    try {
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (userDoc.exists()) {
+            const userData = userDoc.data();
+            return userData.name || userData.username || 'Unknown User';
+        }
+        return 'Unknown User';
+    } catch (error) {
+        console.error('[Get User Display Name] Error:', error);
+        return 'Unknown User';
+    }
+}
+
+// Send gift receipt email
+async function sendGiftReceipt(receiptData) {
+    try {
+        console.log('[Gift Receipt] Sending receipt to:', receiptData.email);
+        
+        // In production, you would use a service like SendGrid, Mailgun, or AWS SES
+        // For now, we'll just log the receipt data
+        console.log('[Gift Receipt] Receipt data:', {
+            to: receiptData.email,
+            subject: `SideEye Gift Receipt - ${receiptData.giftName}`,
+            amount: `${receiptData.currency} ${receiptData.amount.toFixed(2)}`,
+            paymentId: receiptData.paymentId,
+            hostName: receiptData.hostName
+        });
+
+        // TODO: Implement actual email sending
+        // Example with SendGrid:
+        /*
+        const sgMail = require('@sendgrid/mail');
+        sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+        
+        const msg = {
+            to: receiptData.email,
+            from: 'noreply@sideeye.uk',
+            subject: `SideEye Gift Receipt - ${receiptData.giftName}`,
+            html: generateReceiptHTML(receiptData)
+        };
+        
+        await sgMail.send(msg);
+        */
+        
+    } catch (error) {
+        console.error('[Gift Receipt] Error sending receipt:', error);
+    }
+}
+
+// Payment success page endpoint
+app.get('/api/payment-success/:sessionId', async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        
+        if (!stripe) {
+            return res.status(500).json({ error: 'Payment service not configured' });
+        }
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        
+        res.json({
+            success: true,
+            paymentId: session.id,
+            amount: session.amount_total / 100,
+            currency: session.currency.toUpperCase(),
+            status: session.payment_status
+        });
+    } catch (error) {
+        console.error('[Payment Success] Error:', error);
+        res.status(400).json({ error: 'Invalid session ID' });
+    }
+});
+
+// Add withdrawal processing endpoints after the existing payment endpoints
+
+// Withdrawal request endpoint
+app.post('/api/withdrawal-request', async (req, res) => {
+    try {
+        const {
+            userId,
+            amount, // in SC
+            moneyAmount, // in GBP after fees
+            platformFee,
+            grossAmount,
+            bankDetails,
+            userEmail,
+            userName
+        } = req.body;
+
+        console.log('[Withdrawal Request] Processing withdrawal request:', {
+            userId,
+            amount,
+            moneyAmount,
+            platformFee,
+            userEmail
+        });
+
+        // Validate request
+        if (!userId || !amount || !moneyAmount || !bankDetails) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Missing required withdrawal information' 
+            });
+        }
+
+        // Validate minimum withdrawal amount (1000 SC = £5)
+        if (amount < 1000) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Minimum withdrawal is 1000 SC (£5)' 
+            });
+        }
+
+        // Store withdrawal request in database (this would be Firestore in your case)
+        const withdrawalRequest = {
+            userId,
+            amount,
+            moneyAmount,
+            platformFee,
+            grossAmount,
+            status: 'pending',
+            requestDate: new Date(),
+            bankDetails,
+            userEmail,
+            userName,
+            processedBy: null,
+            processedDate: null,
+            transactionId: null
+        };
+
+        // In production, you'd save this to Firestore
+        console.log('[Withdrawal Request] Withdrawal request created:', withdrawalRequest);
+
+        // Send notification to admin (email/Slack/etc.)
+
+
+        res.json({
+            success: true,
+            message: 'Withdrawal request submitted successfully',
+            requestId: `WR_${Date.now()}_${userId.substring(0, 8)}`
+        });
+
+    } catch (error) {
+        console.error('[Withdrawal Request] Error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to process withdrawal request' 
+        });
+    }
+});
+
+
+
+
+
+
 
