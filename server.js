@@ -2484,12 +2484,6 @@ process.on('uncaughtException', (error, origin) => {
 });
 // --- End Add more specific global error handlers ---
 
-// --- STATIC FILE SERVING (MUST BE LAST) ---
-app.use(express.static(path.join(__dirname, '../frontend/build')));
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
-});
-
 const SIDEROM_SECRET = process.env.SIDEROM_WEBHOOK_SECRET; // Store secret securely!
 
 app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
@@ -2529,9 +2523,6 @@ app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
   // 5. Send a success response back to the "sideroom" backend
   res.status(200).json({ status: 'event received' });
 });
-
-// Log at the very end of the script
-console.log('[SERVER END SCRIPT] server.js script fully parsed.');
 
 // Add payment processing endpoint for gifts
 app.post('/api/process-gift-payment', async (req, res) => {
@@ -3130,9 +3121,11 @@ app.post('/api/withdrawal-request', async (req, res) => {
     }
 });
 
+// Log at the very end of the script
+console.log('[SERVER END SCRIPT] server.js script fully parsed.');
 
-
-
-
-
-
+// --- STATIC FILE SERVING (MUST BE LAST) ---
+app.use(express.static(path.join(__dirname, '../frontend/build')));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
+});
