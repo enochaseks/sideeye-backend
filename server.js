@@ -3211,15 +3211,14 @@ console.log('[SERVER END SCRIPT] server.js script fully parsed.');
 // --- STATIC FILE SERVING (MUST BE LAST) ---
 app.use(express.static(path.join(__dirname, '../frontend/build')));
 
-// Catch-all for unmatched API routes (all methods)
-app.all('/api/*', (req, res) => {
-  res.status(404).json({
-    error: 'Not found',
-    details: `API endpoint ${req.method} ${req.path} does not exist`
-  });
-});
-
 // Catch-all handler for React app - ONLY for non-API routes
 app.get('*', (req, res) => {
+  // Don't serve React app for API routes - let them return 404 naturally
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({
+      error: 'Not found',
+      details: `API endpoint ${req.method} ${req.path} does not exist`
+    });
+  }
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
