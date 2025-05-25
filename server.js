@@ -366,6 +366,16 @@ app.get('/api/test', (req, res) => {
   res.json({ message: 'CORS is working!' });
 });
 
+// Simple test endpoint to verify deployment
+app.get('/api/deployment-status', (req, res) => {
+  res.json({ 
+    message: 'Deployment successful!',
+    timestamp: new Date().toISOString(),
+    version: '2.1.0',
+    hasPaymentEndpoint: true
+  });
+});
+
 // Image upload endpoint
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   try {
