@@ -186,6 +186,14 @@ try {
     console.error('  - NODE_ENV:', process.env.NODE_ENV);
     console.error('  - SERVICE_ACCOUNT_KEY:', process.env.SERVICE_ACCOUNT_KEY ? 'SET (length: ' + process.env.SERVICE_ACCOUNT_KEY.length + ')' : 'NOT SET');
     console.error('  - FIREBASE_STORAGE_BUCKET:', process.env.FIREBASE_STORAGE_BUCKET || 'NOT SET');
+    
+    // Don't exit immediately in production - let Railway restart the service
+    console.error('[Firebase Init] Waiting 10 seconds before exit to allow Railway to capture logs...');
+    setTimeout(() => {
+      console.error('[Firebase Init] Exiting due to Firebase initialization failure');
+      process.exit(1);
+    }, 10000); // Wait 10 seconds
+    return; // Don't continue with server startup
   }
   
   process.exit(1);
@@ -316,7 +324,13 @@ app.post('/api/stream-token', async (req, res) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
   console.log('[HEALTH CHECK] Responding 200 OK'); // Add log
-  res.sendStatus(200); // Send only a 200 OK status, no JSON body
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    firebase: !!db,
+    stripe: !!stripe,
+    stream: !!streamClient
+  });
 });
 
 // Service account test endpoint
@@ -2475,10 +2489,24 @@ httpServer.listen(effectivePort, () => {
   console.log('  - Stripe:', !!stripe ? 'OK' : 'DISABLED');
   console.log('  - Stream Chat:', !!streamClient ? 'OK' : 'DISABLED');
   console.log('[SERVER START] Server startup complete!');
+  
+  // Log environment variables for debugging (without sensitive data)
+  console.log('[SERVER START] Environment check:');
+  console.log('  - NODE_ENV:', process.env.NODE_ENV);
+  console.log('  - PORT:', process.env.PORT);
+  console.log('  - SERVICE_ACCOUNT_KEY:', process.env.SERVICE_ACCOUNT_KEY ? 'SET' : 'NOT SET');
+  console.log('  - STRIPE_SECRET_KEY:', process.env.STRIPE_SECRET_KEY ? 'SET' : 'NOT SET');
+  console.log('  - STREAM_API_KEY:', process.env.STREAM_API_KEY ? 'SET' : 'NOT SET');
 }).on('error', (error) => {
   console.error('[SERVER START] Failed to start server:', error);
   console.error('[SERVER START] Error details:', error.message);
-  process.exit(1);
+  console.error('[SERVER START] Error code:', error.code);
+  console.error('[SERVER START] Error stack:', error.stack);
+  
+  // Don't exit immediately - let Railway capture the logs
+  setTimeout(() => {
+    process.exit(1);
+  }, 5000);
 });
 
 // Graceful shutdown
