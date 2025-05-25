@@ -32,9 +32,11 @@ try {
     console.log('Stripe initialized successfully');
   } else {
     console.warn('Stripe Secret Key not found - payment features will be disabled');
+    stripe = null; // Explicitly set to null
   }
 } catch (error) {
   console.error('Error initializing Stripe:', error);
+  stripe = null; // Ensure stripe is null on error
 }
 // For more direct debugging, uncomment these lines temporarily:
 // console.log('RAW STREAM_API_KEY from process.env after dotenv:', process.env.STREAM_API_KEY);
@@ -135,28 +137,57 @@ let serviceAccount;
 let db; // Declare db variable here, outside the try block
 
 try {
+  console.log('[Firebase Init] Starting Firebase Admin SDK initialization...');
+  console.log('[Firebase Init] Environment:', process.env.NODE_ENV);
+  
   if (process.env.NODE_ENV === 'production') {
+    console.log('[Firebase Init] Production mode - checking SERVICE_ACCOUNT_KEY...');
     if (!process.env.SERVICE_ACCOUNT_KEY) {
-      throw new Error('SERVICE_ACCOUNT_KEY environment variable is not set');
+      throw new Error('SERVICE_ACCOUNT_KEY environment variable is not set in production');
     }
-    serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+    try {
+      serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+      console.log('[Firebase Init] SERVICE_ACCOUNT_KEY parsed successfully');
+    } catch (parseError) {
+      throw new Error('Invalid SERVICE_ACCOUNT_KEY format: ' + parseError.message);
+    }
   } else {
-    serviceAccount = require('./serviceAccountKey.json');
+    console.log('[Firebase Init] Development mode - loading serviceAccountKey.json...');
+    try {
+      serviceAccount = require('./serviceAccountKey.json');
+      console.log('[Firebase Init] serviceAccountKey.json loaded successfully');
+    } catch (fileError) {
+      throw new Error('serviceAccountKey.json file not found or invalid: ' + fileError.message);
+    }
   }
 
   if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
-    throw new Error('Invalid service account configuration');
+    throw new Error('Invalid service account configuration - missing required fields');
   }
 
+  console.log('[Firebase Init] Service account validated, initializing Firebase Admin...');
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'sideeye-bafda.appspot.com'
   });
   console.log('Firebase Admin SDK initialized successfully');
   // Get Firestore database instance and assign it
   db = admin.firestore(); 
+  console.log('[Firebase Init] Firestore database instance created');
 } catch (error) {
   console.error('Error initializing Firebase Admin SDK:', error);
+  console.error('Error details:', error.message);
+  console.error('Stack trace:', error.stack);
+  
+  // In production, we should exit, but let's add more debugging
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[Firebase Init] CRITICAL: Firebase initialization failed in production');
+    console.error('[Firebase Init] Available environment variables:');
+    console.error('  - NODE_ENV:', process.env.NODE_ENV);
+    console.error('  - SERVICE_ACCOUNT_KEY:', process.env.SERVICE_ACCOUNT_KEY ? 'SET (length: ' + process.env.SERVICE_ACCOUNT_KEY.length + ')' : 'NOT SET');
+    console.error('  - FIREBASE_STORAGE_BUCKET:', process.env.FIREBASE_STORAGE_BUCKET || 'NOT SET');
+  }
+  
   process.exit(1);
 }
 
@@ -166,12 +197,17 @@ const STREAM_API_KEY = process.env.STREAM_API_KEY;
 const STREAM_API_SECRET = process.env.STREAM_API_SECRET;
 const STREAM_APP_ID = process.env.STREAM_APP_ID;
 
-if (STREAM_API_KEY && STREAM_API_SECRET) {
-  streamClient = StreamChat.getInstance(STREAM_API_KEY, STREAM_API_SECRET);
-  console.log('Stream Chat SDK initialized successfully.');
-} else {
-  console.error('Stream API Key or Secret is missing in environment variables! Stream features will be impacted.');
-  // streamClient will remain undefined, and token generation will fail.
+try {
+  if (STREAM_API_KEY && STREAM_API_SECRET) {
+    streamClient = StreamChat.getInstance(STREAM_API_KEY, STREAM_API_SECRET);
+    console.log('Stream Chat SDK initialized successfully.');
+  } else {
+    console.warn('Stream API Key or Secret is missing in environment variables! Stream features will be impacted.');
+    streamClient = null; // Explicitly set to null
+  }
+} catch (error) {
+  console.error('Error initializing Stream Chat SDK:', error);
+  streamClient = null; // Ensure streamClient is null on error
 }
 // --- End Initialize Stream Client ---
 
@@ -2423,10 +2459,26 @@ async function handleUserLeaveRoom(callingSocket, roomId, userId) { // socket ca
 // Fallback to 8080 only if process.env.PORT is not set (useful for local dev)
 const effectivePort = process.env.PORT || 8080;
 
+console.log('[SERVER STARTUP] Starting server initialization...');
+console.log('[SERVER STARTUP] Environment:', process.env.NODE_ENV);
+console.log('[SERVER STARTUP] Port:', effectivePort);
+console.log('[SERVER STARTUP] Firebase initialized:', !!db);
+console.log('[SERVER STARTUP] Stripe initialized:', !!stripe);
+console.log('[SERVER STARTUP] Stream Chat initialized:', !!streamClient);
+
 httpServer.listen(effectivePort, () => {
   console.log(`Server running on port ${effectivePort} in ${process.env.NODE_ENV || 'development'} mode`);
   // Log right after listen callback fires
   console.log(`[SERVER START] HTTP server is successfully listening on port ${effectivePort}.`);
+  console.log('[SERVER START] All services status:');
+  console.log('  - Firebase Admin:', !!db ? 'OK' : 'FAILED');
+  console.log('  - Stripe:', !!stripe ? 'OK' : 'DISABLED');
+  console.log('  - Stream Chat:', !!streamClient ? 'OK' : 'DISABLED');
+  console.log('[SERVER START] Server startup complete!');
+}).on('error', (error) => {
+  console.error('[SERVER START] Failed to start server:', error);
+  console.error('[SERVER START] Error details:', error.message);
+  process.exit(1);
 });
 
 // Graceful shutdown
@@ -2527,6 +2579,15 @@ app.post('/api/sideroom-moderation-event', express.json(), (req, res) => {
 // Add payment processing endpoint for gifts
 app.post('/api/process-gift-payment', async (req, res) => {
     try {
+        // Check if payment services are available
+        if (!stripe && !process.env.FLUTTERWAVE_SECRET_KEY) {
+            console.error('[Gift Payment] No payment services configured');
+            return res.status(503).json({
+                success: false,
+                error: 'Payment services are currently unavailable'
+            });
+        }
+
         const {
             giftId,
             giftName,
@@ -2565,6 +2626,9 @@ app.post('/api/process-gift-payment', async (req, res) => {
 
         switch (paymentMethod) {
             case 'stripe':
+                if (!stripe) {
+                    throw new Error('Stripe is not configured');
+                }
                 // Use Stripe Checkout for card payments with receipt
                 paymentResult = await createStripeCheckoutSession({
                     amount,
@@ -2583,6 +2647,9 @@ app.post('/api/process-gift-payment', async (req, res) => {
                 break;
 
             case 'google_pay':
+                if (!stripe) {
+                    throw new Error('Stripe is not configured');
+                }
                 // Google Pay uses Stripe Payment Intent
                 paymentResult = await processStripePayment({
                     amount,
@@ -2602,6 +2669,9 @@ app.post('/api/process-gift-payment', async (req, res) => {
                 break;
 
             case 'apple_pay':
+                if (!stripe) {
+                    throw new Error('Stripe is not configured');
+                }
                 // Apple Pay uses Stripe Payment Intent
                 paymentResult = await processStripePayment({
                     amount,
@@ -2816,6 +2886,11 @@ async function processFlutterwavePayment(paymentData) {
 
 // Stripe webhook endpoint for payment confirmations
 app.post('/api/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
+    if (!stripe) {
+        console.error('[Stripe Webhook] Stripe not configured');
+        return res.status(503).json({ error: 'Stripe not configured' });
+    }
+
     const sig = req.headers['stripe-signature'];
     let event;
 
@@ -3126,6 +3201,16 @@ console.log('[SERVER END SCRIPT] server.js script fully parsed.');
 
 // --- STATIC FILE SERVING (MUST BE LAST) ---
 app.use(express.static(path.join(__dirname, '../frontend/build')));
+
+// Catch-all for unmatched API routes (all methods)
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    error: 'Not found',
+    details: `API endpoint ${req.method} ${req.path} does not exist`
+  });
+});
+
+// Catch-all handler for React app - ONLY for non-API routes
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
 });
