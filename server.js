@@ -2648,8 +2648,17 @@ app.post('/api/process-gift-payment', async (req, res) => {
                 paymentId,
                 description: `SideEye Gift: ${giftName}`
             });
+        } else if (paymentMethod === 'basic-card') {
+            // Process basic card payment
+            paymentResult = await processBasicCardPayment({
+                amount: Math.round(amount * 100), // Convert to pence
+                currency: 'GBP',
+                paymentDetails,
+                paymentId,
+                description: `SideEye Gift: ${giftName}`
+            });
         } else {
-            // Process card payment
+            // Process other payment methods
             paymentResult = await processCardPayment({
                 amount: Math.round(amount * 100), // Convert to pence
                 currency: 'GBP',
@@ -3040,6 +3049,68 @@ async function processApplePayPayment(paymentData) {
         }
     } catch (error) {
         console.error('[Apple Pay] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Basic card payment processing
+async function processBasicCardPayment(paymentData) {
+    try {
+        console.log('[Basic Card] Processing payment:', paymentData.paymentId);
+        
+        if (!stripe) {
+            throw new Error('Stripe not configured for card processing');
+        }
+
+        // Extract card details from basic-card payment
+        const cardDetails = paymentData.paymentDetails?.details;
+        
+        if (!cardDetails || !cardDetails.cardNumber) {
+            throw new Error('No card details found in payment details');
+        }
+
+        // Create payment method from card details
+        const paymentMethod = await stripe.paymentMethods.create({
+            type: 'card',
+            card: {
+                number: cardDetails.cardNumber,
+                exp_month: parseInt(cardDetails.expiryMonth),
+                exp_year: parseInt(cardDetails.expiryYear),
+                cvc: cardDetails.cardSecurityCode
+            },
+            billing_details: {
+                name: cardDetails.cardholderName || 'Anonymous'
+            }
+        });
+
+        // Create and confirm payment intent
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: paymentData.amount,
+            currency: paymentData.currency.toLowerCase(),
+            description: paymentData.description,
+            payment_method: paymentMethod.id,
+            confirmation_method: 'manual',
+            confirm: true,
+            metadata: {
+                type: 'basic_card_gift',
+                paymentId: paymentData.paymentId
+            }
+        });
+
+        if (paymentIntent.status === 'succeeded') {
+            return {
+                success: true,
+                paymentId: paymentData.paymentId,
+                transactionId: paymentIntent.id
+            };
+        } else {
+            throw new Error(`Payment failed with status: ${paymentIntent.status}`);
+        }
+    } catch (error) {
+        console.error('[Basic Card] Error:', error);
         return {
             success: false,
             error: error.message
