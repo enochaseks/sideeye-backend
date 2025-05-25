@@ -2585,176 +2585,113 @@ app.get('/api/deployment-test', (req, res) => {
     });
 });
 
-// Add payment processing endpoint for gifts
+// Real gift payment endpoint - processes actual payments
 app.post('/api/process-gift-payment', async (req, res) => {
     try {
-        // Check if payment services are available
-        if (!stripe && !process.env.FLUTTERWAVE_SECRET_KEY) {
-            console.error('[Gift Payment] No payment services configured');
-            return res.status(503).json({
-                success: false,
-                error: 'Payment services are currently unavailable'
-            });
-        }
-
         const {
             giftId,
             giftName,
-            amount, // Amount in smallest currency unit (pence, cents, etc.)
-            currency,
-            paymentMethod,
+            amount, // Amount in GBP (e.g., 0.50 for 50p)
             senderId,
             senderName,
             receiverId,
             roomId,
-            country
+            paymentMethod,
+            paymentDetails
         } = req.body;
 
-        console.log('[Gift Payment] Processing payment:', {
+        console.log('[Gift Payment] Processing real gift payment:', {
             giftId,
             giftName,
             amount,
-            currency,
-            paymentMethod,
             senderId,
             receiverId,
             roomId,
-            country
+            paymentMethod
         });
 
+        // Validate required fields
+        if (!giftId || !giftName || !amount || !senderId || !receiverId || !roomId || !paymentMethod) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required payment information'
+            });
+        }
+
+        // Validate payment amount
+        if (amount < 0.50 || amount > 100) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid payment amount'
+            });
+        }
+
+        // Process payment based on method
         let paymentResult;
+        const paymentId = `gift_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-        // Get user email for receipt
-        let userEmail = null;
-        try {
-            const userRecord = await admin.auth().getUser(senderId);
-            userEmail = userRecord.email;
-        } catch (error) {
-            console.warn('[Gift Payment] Could not get user email:', error.message);
-        }
-
-        switch (paymentMethod) {
-            case 'stripe':
-                if (!stripe) {
-                    throw new Error('Stripe is not configured');
-                }
-                // Use Stripe Checkout for card payments with receipt
-                paymentResult = await createStripeCheckoutSession({
-                    amount,
-                    currency,
-                    description: `Gift: ${giftName}`,
-                    giftName,
-                    customer_email: userEmail,
-                    metadata: {
-                        giftId,
-                        senderId,
-                        receiverId,
-                        roomId,
-                        type: 'gift_payment'
-                    }
-                });
-                break;
-
-            case 'google_pay':
-                if (!stripe) {
-                    throw new Error('Stripe is not configured');
-                }
-                // Google Pay uses Stripe Payment Intent
-                paymentResult = await processStripePayment({
-                    amount,
-                    currency,
-                    description: `Gift: ${giftName} (Google Pay)`,
-                    payment_method_types: ['card'],
-                    receipt_email: userEmail,
-                    metadata: {
-                        giftId,
-                        senderId,
-                        receiverId,
-                        roomId,
-                        type: 'gift_payment',
-                        method: 'google_pay'
-                    }
-                });
-                break;
-
-            case 'apple_pay':
-                if (!stripe) {
-                    throw new Error('Stripe is not configured');
-                }
-                // Apple Pay uses Stripe Payment Intent
-                paymentResult = await processStripePayment({
-                    amount,
-                    currency,
-                    description: `Gift: ${giftName} (Apple Pay)`,
-                    payment_method_types: ['card'],
-                    receipt_email: userEmail,
-                    metadata: {
-                        giftId,
-                        senderId,
-                        receiverId,
-                        roomId,
-                        type: 'gift_payment',
-                        method: 'apple_pay'
-                    }
-                });
-                break;
-
-            case 'flutterwave':
-                paymentResult = await processFlutterwavePayment({
-                    amount,
-                    currency,
-                    email: userEmail || `user_${senderId}@sideeye.app`,
-                    phone_number: '', // Optional
-                    name: senderName,
-                    title: `Gift: ${giftName}`,
-                    description: `Sending ${giftName} gift in SideEye room`,
-                    redirect_url: `${process.env.FRONTEND_URL}/payment-success`,
-                    meta: {
-                        giftId,
-                        senderId,
-                        receiverId,
-                        roomId,
-                        type: 'gift_payment'
-                    }
-                });
-                break;
-
-            default:
-                throw new Error(`Unsupported payment method: ${paymentMethod}`);
-        }
-
-        if (paymentResult.success) {
-            // Log the successful payment
-            console.log('[Gift Payment] Payment initiated:', paymentResult.paymentId || paymentResult.sessionId);
-
-            const response = {
-                success: true,
-                message: 'Payment initiated successfully'
-            };
-
-            // Add appropriate response data based on payment method
-            if (paymentMethod === 'stripe') {
-                response.checkoutUrl = paymentResult.checkoutUrl;
-                response.sessionId = paymentResult.sessionId;
-            } else if (paymentMethod === 'flutterwave') {
-                response.paymentUrl = paymentResult.paymentUrl;
-                response.paymentId = paymentResult.paymentId;
-            } else {
-                response.clientSecret = paymentResult.clientSecret;
-                response.paymentId = paymentResult.paymentId;
-                response.requiresAction = paymentResult.requiresAction;
-            }
-
-            res.json(response);
+        if (paymentMethod === 'https://google.com/pay') {
+            // Process Google Pay payment
+            paymentResult = await processGooglePayPayment({
+                amount: Math.round(amount * 100), // Convert to pence
+                currency: 'GBP',
+                paymentDetails,
+                paymentId,
+                description: `SideEye Gift: ${giftName}`
+            });
+        } else if (paymentMethod === 'https://apple.com/apple-pay') {
+            // Process Apple Pay payment
+            paymentResult = await processApplePayPayment({
+                amount: Math.round(amount * 100), // Convert to pence
+                currency: 'GBP',
+                paymentDetails,
+                paymentId,
+                description: `SideEye Gift: ${giftName}`
+            });
         } else {
-            throw new Error(paymentResult.error || 'Payment failed');
+            // Process card payment
+            paymentResult = await processCardPayment({
+                amount: Math.round(amount * 100), // Convert to pence
+                currency: 'GBP',
+                paymentDetails,
+                paymentId,
+                description: `SideEye Gift: ${giftName}`
+            });
         }
+
+        if (!paymentResult.success) {
+            return res.status(400).json({
+                success: false,
+                error: paymentResult.error || 'Payment processing failed'
+            });
+        }
+
+        // Only process gift if payment was successful
+        await processGiftPaymentSuccess({
+            giftId,
+            giftName,
+            senderId,
+            senderName,
+            receiverId,
+            roomId,
+            amount,
+            currency: 'GBP',
+            paymentId: paymentResult.paymentId || paymentId,
+            paymentMethod,
+            transactionId: paymentResult.transactionId
+        });
+
+        res.json({
+            success: true,
+            message: 'Payment processed and gift sent successfully!',
+            paymentId: paymentResult.paymentId || paymentId
+        });
 
     } catch (error) {
         console.error('[Gift Payment] Error processing payment:', error);
-        res.status(400).json({
+        res.status(500).json({
             success: false,
-            error: error.message || 'Payment processing failed'
+            error: 'Payment processing failed. Please try again.'
         });
     }
 });
@@ -2988,6 +2925,193 @@ async function handleStripePaymentSucceeded(paymentIntent) {
 async function handleStripePaymentFailed(paymentIntent) {
     console.log('[Stripe Webhook] Payment failed:', paymentIntent.id);
     // You can add logic here to handle failed payments if needed
+}
+
+// Google Pay payment processing
+async function processGooglePayPayment(paymentData) {
+    try {
+        console.log('[Google Pay] Processing payment:', paymentData.paymentId);
+        
+        if (!stripe) {
+            throw new Error('Stripe not configured for Google Pay processing');
+        }
+
+        // Extract the Google Pay token from payment details
+        const googlePayToken = paymentData.paymentDetails?.details?.paymentMethodData?.tokenizationData?.token;
+        
+        if (!googlePayToken) {
+            throw new Error('No Google Pay token found in payment details');
+        }
+
+        // Parse the Google Pay token (it's usually a JSON string)
+        let tokenData;
+        try {
+            tokenData = JSON.parse(googlePayToken);
+        } catch (e) {
+            throw new Error('Invalid Google Pay token format');
+        }
+
+        // Create payment method from Google Pay token
+        const paymentMethod = await stripe.paymentMethods.create({
+            type: 'card',
+            card: {
+                token: tokenData.id // Use the token ID from Google Pay
+            }
+        });
+
+        // Create and confirm payment intent
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: paymentData.amount,
+            currency: paymentData.currency.toLowerCase(),
+            description: paymentData.description,
+            payment_method: paymentMethod.id,
+            confirmation_method: 'manual',
+            confirm: true,
+            metadata: {
+                type: 'google_pay_gift',
+                paymentId: paymentData.paymentId
+            }
+        });
+
+        if (paymentIntent.status === 'succeeded') {
+            return {
+                success: true,
+                paymentId: paymentData.paymentId,
+                transactionId: paymentIntent.id
+            };
+        } else {
+            throw new Error(`Payment failed with status: ${paymentIntent.status}`);
+        }
+    } catch (error) {
+        console.error('[Google Pay] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Apple Pay payment processing
+async function processApplePayPayment(paymentData) {
+    try {
+        console.log('[Apple Pay] Processing payment:', paymentData.paymentId);
+        
+        if (!stripe) {
+            throw new Error('Stripe not configured for Apple Pay processing');
+        }
+
+        // Extract the Apple Pay token from payment details
+        const applePayToken = paymentData.paymentDetails?.details?.paymentData;
+        
+        if (!applePayToken) {
+            throw new Error('No Apple Pay token found in payment details');
+        }
+
+        // Create payment method from Apple Pay token
+        const paymentMethod = await stripe.paymentMethods.create({
+            type: 'card',
+            card: {
+                token: applePayToken.paymentMethod?.token || applePayToken.token
+            }
+        });
+
+        // Create and confirm payment intent
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: paymentData.amount,
+            currency: paymentData.currency.toLowerCase(),
+            description: paymentData.description,
+            payment_method: paymentMethod.id,
+            confirmation_method: 'manual',
+            confirm: true,
+            metadata: {
+                type: 'apple_pay_gift',
+                paymentId: paymentData.paymentId
+            }
+        });
+
+        if (paymentIntent.status === 'succeeded') {
+            return {
+                success: true,
+                paymentId: paymentData.paymentId,
+                transactionId: paymentIntent.id
+            };
+        } else {
+            throw new Error(`Payment failed with status: ${paymentIntent.status}`);
+        }
+    } catch (error) {
+        console.error('[Apple Pay] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Card payment processing
+async function processCardPayment(paymentData) {
+    try {
+        console.log('[Card Payment] Processing payment:', paymentData.paymentId);
+        
+        if (!stripe) {
+            throw new Error('Stripe not configured for card processing');
+        }
+
+        // Extract card details from payment details
+        const cardDetails = paymentData.paymentDetails?.details;
+        
+        if (!cardDetails) {
+            throw new Error('No card details found in payment details');
+        }
+
+        // For basic card payments, we might get different token formats
+        let paymentMethodId;
+        
+        if (cardDetails.paymentMethod) {
+            // If we have a payment method ID directly
+            paymentMethodId = cardDetails.paymentMethod;
+        } else if (cardDetails.token) {
+            // Create payment method from token
+            const paymentMethod = await stripe.paymentMethods.create({
+                type: 'card',
+                card: {
+                    token: cardDetails.token
+                }
+            });
+            paymentMethodId = paymentMethod.id;
+        } else {
+            throw new Error('No valid payment method or token found');
+        }
+
+        // Create and confirm payment intent
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: paymentData.amount,
+            currency: paymentData.currency.toLowerCase(),
+            description: paymentData.description,
+            payment_method: paymentMethodId,
+            confirmation_method: 'manual',
+            confirm: true,
+            metadata: {
+                type: 'card_gift',
+                paymentId: paymentData.paymentId
+            }
+        });
+
+        if (paymentIntent.status === 'succeeded') {
+            return {
+                success: true,
+                paymentId: paymentData.paymentId,
+                transactionId: paymentIntent.id
+            };
+        } else {
+            throw new Error(`Payment failed with status: ${paymentIntent.status}`);
+        }
+    } catch (error) {
+        console.error('[Card Payment] Error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
 }
 
 // Process successful gift payment
