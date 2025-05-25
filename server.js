@@ -3161,6 +3161,10 @@ async function processGiftPaymentSuccess(paymentData) {
     try {
         console.log('[Gift Payment Success] Processing:', paymentData);
 
+        // Calculate platform fee (10% of gift cost)
+        const platformFeeAmount = paymentData.amount * 0.10; // 10% platform fee
+        const hostEarningAmount = paymentData.amount * 0.80; // 80% to host (remaining 10% covers processing fees)
+
         // Add gift to Firestore
         const giftRef = db.collection('sideRooms').doc(paymentData.roomId).collection('gifts').doc();
         await giftRef.set({
@@ -3175,11 +3179,13 @@ async function processGiftPaymentSuccess(paymentData) {
             cost: paymentData.amount,
             currency: paymentData.currency,
             paymentId: paymentData.paymentId,
-            status: 'completed'
+            status: 'completed',
+            platformFee: platformFeeAmount,
+            hostEarning: hostEarningAmount
         });
 
-        // Calculate host earnings (80% of gift cost in SC)
-        const hostEarningInSC = (paymentData.amount * 0.8) / 0.005; // Convert to SideCoins
+        // Calculate host earnings in SideCoins (80% of gift cost)
+        const hostEarningInSC = hostEarningAmount / 0.005; // Convert to SideCoins
         
         // Update host's balance
         const hostRef = db.collection('users').doc(paymentData.receiverId);
@@ -3187,6 +3193,27 @@ async function processGiftPaymentSuccess(paymentData) {
             sideCoins: admin.firestore.FieldValue.increment(hostEarningInSC),
             giftCount: admin.firestore.FieldValue.increment(1),
             giftValue: admin.firestore.FieldValue.increment(paymentData.amount)
+        });
+
+        // Record platform fee for accounting
+        await recordPlatformFee({
+            amount: platformFeeAmount,
+            currency: paymentData.currency,
+            giftId: paymentData.giftId,
+            paymentId: paymentData.paymentId,
+            senderId: paymentData.senderId,
+            receiverId: paymentData.receiverId,
+            roomId: paymentData.roomId,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        // Transfer platform fee to business account (try Stripe first, fallback to manual)
+        await processPlatformFeeTransfer({
+            amount: platformFeeAmount,
+            currency: paymentData.currency,
+            paymentId: paymentData.paymentId,
+            giftId: paymentData.giftId,
+            description: `Platform fee for gift ${paymentData.giftId} - ${paymentData.paymentId}`
         });
 
         // Send receipt email if email is available
@@ -3425,6 +3452,290 @@ function getGiftEmoji(giftName) {
     return emojis[giftName] || '🎁';
 }
 
+// Record platform fee for accounting and analytics
+async function recordPlatformFee(feeData) {
+    try {
+        console.log('[Platform Fee] Recording fee:', feeData.amount, feeData.currency);
+        
+        // Store in Firestore for accounting
+        await db.collection('platformFees').add({
+            amount: feeData.amount,
+            currency: feeData.currency,
+            giftId: feeData.giftId,
+            paymentId: feeData.paymentId,
+            senderId: feeData.senderId,
+            receiverId: feeData.receiverId,
+            roomId: feeData.roomId,
+            timestamp: feeData.timestamp,
+            status: 'recorded',
+            transferStatus: 'pending'
+        });
+        
+        console.log('[Platform Fee] Fee recorded successfully');
+    } catch (error) {
+        console.error('[Platform Fee] Error recording fee:', error);
+    }
+}
+
+// Transfer platform fee to business account using Stripe
+async function transferPlatformFeeToBusinessAccount(transferData) {
+    try {
+        if (!stripe) {
+            console.warn('[Platform Fee Transfer] Stripe not configured - skipping transfer');
+            return;
+        }
+
+        console.log('[Platform Fee Transfer] Transferring to business account:', transferData.amount, transferData.currency);
+        
+        // Convert amount to cents for Stripe
+        const amountInCents = Math.round(transferData.amount * 100);
+        
+        // Create transfer to your business account
+        const transfer = await stripe.transfers.create({
+            amount: amountInCents,
+            currency: transferData.currency.toLowerCase(),
+            destination: process.env.STRIPE_BUSINESS_ACCOUNT_ID, // Your Stripe Connect account ID
+            description: transferData.description,
+            metadata: {
+                type: 'platform_fee',
+                paymentId: transferData.paymentId,
+                originalAmount: transferData.amount.toString()
+            }
+        });
+
+        console.log('[Platform Fee Transfer] Transfer successful:', transfer.id);
+        
+        // Update the platform fee record with transfer info
+        const feeQuery = db.collection('platformFees').where('paymentId', '==', transferData.paymentId);
+        const feeSnapshot = await feeQuery.get();
+        
+        if (!feeSnapshot.empty) {
+            const feeDoc = feeSnapshot.docs[0];
+            await feeDoc.ref.update({
+                transferStatus: 'completed',
+                transferId: transfer.id,
+                transferDate: admin.firestore.FieldValue.serverTimestamp()
+            });
+        }
+        
+        return transfer;
+    } catch (error) {
+        console.error('[Platform Fee Transfer] Error transferring fee:', error);
+        
+        // Update the platform fee record with error status
+        try {
+            const feeQuery = db.collection('platformFees').where('paymentId', '==', transferData.paymentId);
+            const feeSnapshot = await feeQuery.get();
+            
+            if (!feeSnapshot.empty) {
+                const feeDoc = feeSnapshot.docs[0];
+                await feeDoc.ref.update({
+                    transferStatus: 'failed',
+                    transferError: error.message,
+                    transferDate: admin.firestore.FieldValue.serverTimestamp()
+                });
+            }
+        } catch (updateError) {
+            console.error('[Platform Fee Transfer] Error updating fee record:', updateError);
+        }
+    }
+}
+
+// Alternative: Manual bank transfer function (for non-Stripe solutions)
+async function scheduleBankTransfer(transferData) {
+    try {
+        console.log('[Bank Transfer] Scheduling manual transfer:', transferData.amount, transferData.currency);
+        
+        // Store transfer request for manual processing
+        const transferDoc = await db.collection('pendingBankTransfers').add({
+            amount: transferData.amount,
+            currency: transferData.currency,
+            type: 'platform_fee',
+            paymentId: transferData.paymentId,
+            giftId: transferData.giftId || null,
+            description: transferData.description,
+            status: 'pending_manual_processing',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            businessBankAccount: {
+                accountName: process.env.BUSINESS_BANK_ACCOUNT_NAME || 'SideEye Ltd',
+                accountNumber: process.env.BUSINESS_BANK_ACCOUNT_NUMBER,
+                sortCode: process.env.BUSINESS_BANK_SORT_CODE,
+                bankName: process.env.BUSINESS_BANK_NAME
+            },
+            priority: 'normal', // Can be 'high', 'normal', 'low'
+            transferMethod: 'manual_bank_transfer'
+        });
+        
+        // Update the platform fee record to show it's scheduled for manual transfer
+        await updatePlatformFeeRecord(transferData.paymentId, {
+            transferStatus: 'scheduled_manual',
+            manualTransferId: transferDoc.id,
+            transferDate: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        // Send notification to admin about pending transfer
+        if (process.env.ADMIN_EMAIL) {
+            await sendAdminNotification({
+                type: 'pending_bank_transfer',
+                amount: transferData.amount,
+                currency: transferData.currency,
+                paymentId: transferData.paymentId,
+                transferId: transferDoc.id
+            });
+        }
+        
+        console.log('[Bank Transfer] Transfer scheduled for manual processing with ID:', transferDoc.id);
+        return transferDoc.id;
+    } catch (error) {
+        console.error('[Bank Transfer] Error scheduling transfer:', error);
+        throw error; // Re-throw so the calling function knows it failed
+    }
+}
+
+// Send admin notification for manual transfers
+async function sendAdminNotification(notificationData) {
+    try {
+        if (!process.env.MAILGUN_API_KEY || !process.env.MAILGUN_DOMAIN || !process.env.ADMIN_EMAIL) {
+            console.warn('[Admin Notification] Email not configured - skipping notification');
+            return;
+        }
+
+        const mailgunApiKey = process.env.MAILGUN_API_KEY;
+        const mailgunDomain = process.env.MAILGUN_DOMAIN;
+        
+        const reasonText = notificationData.reason ? 
+            `<p><strong>Reason:</strong> ${notificationData.reason}</p>` : '';
+        
+        const formData = new URLSearchParams();
+        formData.append('from', `SideEye Admin <admin@${mailgunDomain}>`);
+        formData.append('to', process.env.ADMIN_EMAIL);
+        formData.append('subject', `💰 Platform Fee Transfer Required - ${notificationData.currency} ${notificationData.amount.toFixed(2)}`);
+        formData.append('html', `
+            <h2>Platform Fee Transfer Required</h2>
+            <p><strong>Amount:</strong> ${notificationData.currency} ${notificationData.amount.toFixed(2)}</p>
+            <p><strong>Payment ID:</strong> ${notificationData.paymentId}</p>
+            <p><strong>Type:</strong> ${notificationData.type}</p>
+            <p><strong>Date:</strong> ${new Date().toLocaleString()}</p>
+            ${reasonText}
+            
+            <p>Please process this transfer to your business bank account.</p>
+            
+            <hr>
+            <h3>Business Bank Details:</h3>
+            <p><strong>Account Name:</strong> ${process.env.BUSINESS_BANK_ACCOUNT_NAME || 'SideEye Ltd'}</p>
+            <p><strong>Account Number:</strong> ${process.env.BUSINESS_BANK_ACCOUNT_NUMBER || 'Not configured'}</p>
+            <p><strong>Sort Code:</strong> ${process.env.BUSINESS_BANK_SORT_CODE || 'Not configured'}</p>
+            <p><strong>Bank Name:</strong> ${process.env.BUSINESS_BANK_NAME || 'Not configured'}</p>
+        `);
+
+        const response = await fetch(`https://api.mailgun.net/v3/${mailgunDomain}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${Buffer.from(`api:${mailgunApiKey}`).toString('base64')}`,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: formData
+        });
+
+        if (response.ok) {
+            console.log('[Admin Notification] Email sent successfully');
+        } else {
+            console.error('[Admin Notification] Failed to send email');
+        }
+    } catch (error) {
+        console.error('[Admin Notification] Error sending notification:', error);
+    }
+}
+
+// Main platform fee transfer processor (tries Stripe first, falls back to manual)
+async function processPlatformFeeTransfer(transferData) {
+    try {
+        console.log('[Platform Fee Transfer] Processing transfer:', transferData.amount, transferData.currency);
+        
+        // Method 1: Try Stripe Connect first (if configured)
+        if (process.env.STRIPE_BUSINESS_ACCOUNT_ID && stripe) {
+            console.log('[Platform Fee Transfer] Attempting Stripe Connect transfer...');
+            
+            try {
+                const stripeResult = await transferPlatformFeeToBusinessAccount(transferData);
+                if (stripeResult) {
+                    console.log('[Platform Fee Transfer] Stripe transfer successful:', stripeResult.id);
+                    return { method: 'stripe', success: true, transferId: stripeResult.id };
+                }
+            } catch (stripeError) {
+                console.warn('[Platform Fee Transfer] Stripe transfer failed, falling back to manual:', stripeError.message);
+                
+                // Update platform fee record with Stripe failure info
+                await updatePlatformFeeRecord(transferData.paymentId, {
+                    stripeAttempted: true,
+                    stripeError: stripeError.message,
+                    stripeAttemptDate: admin.firestore.FieldValue.serverTimestamp()
+                });
+                
+                // Send notification about Stripe failure
+                if (process.env.ADMIN_EMAIL) {
+                    await sendAdminNotification({
+                        type: 'stripe_transfer_failed',
+                        amount: transferData.amount,
+                        currency: transferData.currency,
+                        paymentId: transferData.paymentId,
+                        reason: `Stripe transfer failed: ${stripeError.message}. Falling back to manual transfer.`
+                    });
+                }
+            }
+        } else {
+            console.log('[Platform Fee Transfer] Stripe Connect not configured, using manual transfer');
+        }
+        
+        // Method 2: Fallback to manual bank transfer
+        console.log('[Platform Fee Transfer] Processing manual bank transfer...');
+        await scheduleBankTransfer(transferData);
+        
+        return { method: 'manual', success: true, message: 'Scheduled for manual processing' };
+        
+    } catch (error) {
+        console.error('[Platform Fee Transfer] All transfer methods failed:', error);
+        
+        // Update platform fee record with complete failure
+        await updatePlatformFeeRecord(transferData.paymentId, {
+            transferStatus: 'failed',
+            transferError: error.message,
+            transferDate: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        // Send critical failure notification
+        if (process.env.ADMIN_EMAIL) {
+            await sendAdminNotification({
+                type: 'transfer_complete_failure',
+                amount: transferData.amount,
+                currency: transferData.currency,
+                paymentId: transferData.paymentId,
+                reason: `CRITICAL: All transfer methods failed. Error: ${error.message}`
+            });
+        }
+        
+        return { method: 'none', success: false, error: error.message };
+    }
+}
+
+// Helper function to update platform fee records
+async function updatePlatformFeeRecord(paymentId, updateData) {
+    try {
+        const feeQuery = db.collection('platformFees').where('paymentId', '==', paymentId);
+        const feeSnapshot = await feeQuery.get();
+        
+        if (!feeSnapshot.empty) {
+            const feeDoc = feeSnapshot.docs[0];
+            await feeDoc.ref.update(updateData);
+            console.log('[Platform Fee Record] Updated successfully');
+        } else {
+            console.warn('[Platform Fee Record] No record found for paymentId:', paymentId);
+        }
+    } catch (error) {
+        console.error('[Platform Fee Record] Error updating record:', error);
+    }
+}
+
 // Payment success page endpoint
 app.get('/api/payment-success/:sessionId', async (req, res) => {
     try {
@@ -3446,6 +3757,200 @@ app.get('/api/payment-success/:sessionId', async (req, res) => {
     } catch (error) {
         console.error('[Payment Success] Error:', error);
         res.status(400).json({ error: 'Invalid session ID' });
+    }
+});
+
+// Platform fee analytics endpoint (admin only)
+app.get('/api/admin/platform-fees', async (req, res) => {
+    try {
+        // TODO: Add admin authentication here
+        const { startDate, endDate, limit = 100 } = req.query;
+        
+        let query = db.collection('platformFees').orderBy('timestamp', 'desc');
+        
+        if (startDate) {
+            query = query.where('timestamp', '>=', new Date(startDate));
+        }
+        if (endDate) {
+            query = query.where('timestamp', '<=', new Date(endDate));
+        }
+        
+        query = query.limit(parseInt(limit));
+        
+        const snapshot = await query.get();
+        const fees = [];
+        let totalFees = 0;
+        let totalTransferred = 0;
+        let pendingTransfers = 0;
+        
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            fees.push({
+                id: doc.id,
+                ...data,
+                timestamp: data.timestamp?.toDate?.() || data.timestamp
+            });
+            
+            totalFees += data.amount || 0;
+            
+            if (data.transferStatus === 'completed') {
+                totalTransferred += data.amount || 0;
+            } else if (data.transferStatus === 'pending') {
+                pendingTransfers += data.amount || 0;
+            }
+        });
+        
+        res.json({
+            fees,
+            analytics: {
+                totalFees: totalFees.toFixed(2),
+                totalTransferred: totalTransferred.toFixed(2),
+                pendingTransfers: pendingTransfers.toFixed(2),
+                transferRate: totalFees > 0 ? ((totalTransferred / totalFees) * 100).toFixed(1) : 0
+            }
+        });
+        
+    } catch (error) {
+        console.error('[Admin Platform Fees] Error:', error);
+        res.status(500).json({ error: 'Failed to fetch platform fees' });
+    }
+});
+
+// Manual transfer trigger endpoint (admin only)
+app.post('/api/admin/trigger-transfer', async (req, res) => {
+    try {
+        // TODO: Add admin authentication here
+        const { feeId } = req.body;
+        
+        if (!feeId) {
+            return res.status(400).json({ error: 'Fee ID required' });
+        }
+        
+        const feeDoc = await db.collection('platformFees').doc(feeId).get();
+        
+        if (!feeDoc.exists) {
+            return res.status(404).json({ error: 'Platform fee not found' });
+        }
+        
+        const feeData = feeDoc.data();
+        
+        if (feeData.transferStatus === 'completed') {
+            return res.status(400).json({ error: 'Transfer already completed' });
+        }
+        
+        // Attempt transfer
+        const transferResult = await transferPlatformFeeToBusinessAccount({
+            amount: feeData.amount,
+            currency: feeData.currency,
+            paymentId: feeData.paymentId,
+            description: `Manual transfer for platform fee - ${feeData.paymentId}`
+        });
+        
+        if (transferResult) {
+            res.json({ 
+                success: true, 
+                transferId: transferResult.id,
+                message: 'Transfer completed successfully'
+            });
+        } else {
+            res.status(500).json({ error: 'Transfer failed' });
+        }
+        
+    } catch (error) {
+        console.error('[Admin Transfer Trigger] Error:', error);
+        res.status(500).json({ error: 'Failed to trigger transfer' });
+    }
+});
+
+// Get pending manual transfers (admin only)
+app.get('/api/admin/pending-transfers', async (req, res) => {
+    try {
+        // TODO: Add admin authentication here
+        const { status = 'pending_manual_processing', limit = 50 } = req.query;
+        
+        let query = db.collection('pendingBankTransfers')
+            .where('status', '==', status)
+            .orderBy('createdAt', 'desc')
+            .limit(parseInt(limit));
+        
+        const snapshot = await query.get();
+        const transfers = [];
+        let totalAmount = 0;
+        
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            transfers.push({
+                id: doc.id,
+                ...data,
+                createdAt: data.createdAt?.toDate?.() || data.createdAt
+            });
+            totalAmount += data.amount || 0;
+        });
+        
+        res.json({
+            transfers,
+            summary: {
+                count: transfers.length,
+                totalAmount: totalAmount.toFixed(2),
+                currency: transfers.length > 0 ? transfers[0].currency : 'GBP'
+            }
+        });
+        
+    } catch (error) {
+        console.error('[Admin Pending Transfers] Error:', error);
+        res.status(500).json({ error: 'Failed to fetch pending transfers' });
+    }
+});
+
+// Mark manual transfer as completed (admin only)
+app.post('/api/admin/complete-manual-transfer', async (req, res) => {
+    try {
+        // TODO: Add admin authentication here
+        const { transferId, bankTransactionId, notes } = req.body;
+        
+        if (!transferId) {
+            return res.status(400).json({ error: 'Transfer ID required' });
+        }
+        
+        // Update the pending transfer record
+        const transferRef = db.collection('pendingBankTransfers').doc(transferId);
+        const transferDoc = await transferRef.get();
+        
+        if (!transferDoc.exists) {
+            return res.status(404).json({ error: 'Transfer not found' });
+        }
+        
+        const transferData = transferDoc.data();
+        
+        await transferRef.update({
+            status: 'completed',
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
+            bankTransactionId: bankTransactionId || null,
+            completionNotes: notes || null,
+            completedBy: 'admin' // In production, use actual admin user ID
+        });
+        
+        // Update the corresponding platform fee record
+        if (transferData.paymentId) {
+            await updatePlatformFeeRecord(transferData.paymentId, {
+                transferStatus: 'completed',
+                manualTransferCompleted: true,
+                bankTransactionId: bankTransactionId || null,
+                transferCompletedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        }
+        
+        res.json({
+            success: true,
+            message: 'Manual transfer marked as completed',
+            transferId: transferId,
+            amount: transferData.amount,
+            currency: transferData.currency
+        });
+        
+    } catch (error) {
+        console.error('[Admin Complete Transfer] Error:', error);
+        res.status(500).json({ error: 'Failed to complete transfer' });
     }
 });
 
