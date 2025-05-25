@@ -3736,6 +3736,29 @@ async function updatePlatformFeeRecord(paymentId, updateData) {
     }
 }
 
+// Admin authentication middleware
+async function authenticateAdmin(req, res, next) {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'No authorization token provided' });
+        }
+        
+        const token = authHeader.split(' ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        
+        if (decodedToken.email !== 'contact@sideeye.uk' && decodedToken.email !== 'enochaseks@yahoo.co.uk') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        req.adminUser = decodedToken;
+        next();
+    } catch (authError) {
+        console.error('[Admin Auth] Error:', authError);
+        return res.status(401).json({ error: 'Invalid authorization token' });
+    }
+}
+
 // Payment success page endpoint
 app.get('/api/payment-success/:sessionId', async (req, res) => {
     try {
@@ -3761,9 +3784,8 @@ app.get('/api/payment-success/:sessionId', async (req, res) => {
 });
 
 // Platform fee analytics endpoint (admin only)
-app.get('/api/admin/platform-fees', async (req, res) => {
+app.get('/api/admin/platform-fees', authenticateAdmin, async (req, res) => {
     try {
-        // TODO: Add admin authentication here
         const { startDate, endDate, limit = 100 } = req.query;
         
         let query = db.collection('platformFees').orderBy('timestamp', 'desc');
@@ -3954,9 +3976,244 @@ app.post('/api/admin/complete-manual-transfer', async (req, res) => {
     }
 });
 
+// Admin endpoint to view withdrawal requests
+app.get('/api/admin/withdrawal-requests', authenticateAdmin, async (req, res) => {
+    try {
+        const { status, limit = 50, userId } = req.query;
+        
+        let query = db.collection('withdrawalRequests').orderBy('requestDate', 'desc');
+        
+        if (status) {
+            query = query.where('status', '==', status);
+        }
+        
+        if (userId) {
+            query = query.where('userId', '==', userId);
+        }
+        
+        if (limit) {
+            query = query.limit(parseInt(limit));
+        }
+        
+        const snapshot = await query.get();
+        const withdrawals = [];
+        
+        for (const doc of snapshot.docs) {
+            const data = doc.data();
+            
+            // Get bank details if bankDetailsId exists
+            let bankDetails = null;
+            if (data.bankDetailsId && data.userId) {
+                try {
+                    const bankDetailsDoc = await db.collection('users')
+                        .doc(data.userId)
+                        .collection('bankDetails')
+                        .doc(data.bankDetailsId)
+                        .get();
+                    
+                    if (bankDetailsDoc.exists()) {
+                        const bankData = bankDetailsDoc.data();
+                        bankDetails = {
+                            accountName: bankData.accountName,
+                            bankName: bankData.bankName,
+                            sortCode: bankData.sortCode,
+                            // For admin view, show full account number (encrypted in storage)
+                            accountNumber: bankData.accountNumber
+                        };
+                    }
+                } catch (error) {
+                    console.error('[Admin] Error fetching bank details:', error);
+                }
+            }
+            
+            withdrawals.push({
+                id: doc.id,
+                ...data,
+                bankDetails,
+                requestDate: data.requestDate?.toDate(),
+                processedDate: data.processedDate?.toDate()
+            });
+        }
+        
+        res.json({
+            success: true,
+            withdrawals,
+            total: withdrawals.length
+        });
+        
+    } catch (error) {
+        console.error('[Admin] Error fetching withdrawal requests:', error);
+        res.status(500).json({ error: 'Failed to fetch withdrawal requests' });
+    }
+});
+
+// Admin endpoint to approve/reject withdrawal requests
+app.post('/api/admin/withdrawal-requests/:id/update-status', authenticateAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status, adminNotes, bankTransactionId } = req.body;
+        
+        if (!['approved', 'rejected', 'completed'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status' });
+        }
+        
+        const withdrawalRef = db.collection('withdrawalRequests').doc(id);
+        const withdrawalDoc = await withdrawalRef.get();
+        
+        if (!withdrawalDoc.exists()) {
+            return res.status(404).json({ error: 'Withdrawal request not found' });
+        }
+        
+        const withdrawalData = withdrawalDoc.data();
+        
+        // Update withdrawal status
+        const updateData = {
+            status,
+            processedDate: admin.firestore.FieldValue.serverTimestamp(),
+            adminNotes: adminNotes || '',
+            processedBy: 'admin' // In production, use actual admin user ID
+        };
+        
+        if (bankTransactionId) {
+            updateData.bankTransactionId = bankTransactionId;
+        }
+        
+        await withdrawalRef.update(updateData);
+        
+        // If rejected, refund the user's balance
+        if (status === 'rejected') {
+            const userRef = db.collection('users').doc(withdrawalData.userId);
+            const userDoc = await userRef.get();
+            
+            if (userDoc.exists()) {
+                const userData = userDoc.data();
+                const currentBalance = userData.sideCoins || 0;
+                const pendingWithdrawal = userData.pendingWithdrawal || 0;
+                
+                await userRef.update({
+                    sideCoins: currentBalance + withdrawalData.amount,
+                    pendingWithdrawal: Math.max(0, pendingWithdrawal - withdrawalData.amount)
+                });
+                
+                console.log(`[Admin] Refunded ${withdrawalData.amount} SC to user ${withdrawalData.userId}`);
+            }
+        }
+        
+        // If approved, send notification to process bank transfer
+        if (status === 'approved') {
+            try {
+                const bankDetailsDoc = await db.collection('users')
+                    .doc(withdrawalData.userId)
+                    .collection('bankDetails')
+                    .doc(withdrawalData.bankDetailsId)
+                    .get();
+                
+                if (bankDetailsDoc.exists()) {
+                    const bankData = bankDetailsDoc.data();
+                    
+                    // Send notification to admin for manual bank transfer
+                    await sendAdminNotification({
+                        type: 'withdrawal_approved',
+                        amount: withdrawalData.moneyAmount,
+                        currency: 'GBP',
+                        withdrawalId: id,
+                        userEmail: withdrawalData.userEmail,
+                        userName: withdrawalData.userName,
+                        bankDetails: {
+                            accountName: bankData.accountName,
+                            accountNumber: bankData.accountNumber,
+                            sortCode: bankData.sortCode,
+                            bankName: bankData.bankName
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('[Admin] Error sending bank transfer notification:', error);
+            }
+        }
+        
+        res.json({
+            success: true,
+            message: `Withdrawal request ${status} successfully`
+        });
+        
+    } catch (error) {
+        console.error('[Admin] Error updating withdrawal status:', error);
+        res.status(500).json({ error: 'Failed to update withdrawal status' });
+    }
+});
+
+// Enhanced admin notification function for withdrawals
+async function sendWithdrawalNotification(notificationData) {
+    try {
+        if (!process.env.MAILGUN_API_KEY || !process.env.MAILGUN_DOMAIN || !process.env.ADMIN_EMAIL) {
+            console.warn('[Withdrawal Notification] Email not configured - skipping notification');
+            return;
+        }
+
+        const mailgunApiKey = process.env.MAILGUN_API_KEY;
+        const mailgunDomain = process.env.MAILGUN_DOMAIN;
+        
+        let subject, htmlContent;
+        
+        if (notificationData.type === 'withdrawal_approved') {
+            subject = `💰 Withdrawal Approved - £${notificationData.amount.toFixed(2)} to ${notificationData.userName}`;
+            htmlContent = `
+                <h2>Withdrawal Approved - Bank Transfer Required</h2>
+                <p><strong>User:</strong> ${notificationData.userName} (${notificationData.userEmail})</p>
+                <p><strong>Amount:</strong> £${notificationData.amount.toFixed(2)}</p>
+                <p><strong>Withdrawal ID:</strong> ${notificationData.withdrawalId}</p>
+                <p><strong>Date:</strong> ${new Date().toLocaleString()}</p>
+                
+                <hr>
+                <h3>Bank Transfer Details:</h3>
+                <p><strong>Account Name:</strong> ${notificationData.bankDetails.accountName}</p>
+                <p><strong>Account Number:</strong> ${notificationData.bankDetails.accountNumber}</p>
+                <p><strong>Sort Code:</strong> ${notificationData.bankDetails.sortCode}</p>
+                <p><strong>Bank Name:</strong> ${notificationData.bankDetails.bankName}</p>
+                
+                <p><strong>Reference:</strong> SIDEEYE-${notificationData.withdrawalId}</p>
+                
+                <p>Please process this bank transfer and mark as completed in the admin panel.</p>
+            `;
+        } else {
+            subject = `🔔 Withdrawal Notification - ${notificationData.type}`;
+            htmlContent = `
+                <h2>Withdrawal Notification</h2>
+                <p><strong>Type:</strong> ${notificationData.type}</p>
+                <p><strong>Amount:</strong> £${notificationData.amount.toFixed(2)}</p>
+                <p><strong>Details:</strong> ${JSON.stringify(notificationData, null, 2)}</p>
+            `;
+        }
+        
+        const formData = new URLSearchParams();
+        formData.append('from', `SideEye Admin <admin@${mailgunDomain}>`);
+        formData.append('to', process.env.ADMIN_EMAIL);
+        formData.append('subject', subject);
+        formData.append('html', htmlContent);
+
+        const response = await fetch(`https://api.mailgun.net/v3/${mailgunDomain}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${Buffer.from(`api:${mailgunApiKey}`).toString('base64')}`,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: formData
+        });
+
+        if (response.ok) {
+            console.log('[Withdrawal Notification] Email sent successfully');
+        } else {
+            console.error('[Withdrawal Notification] Failed to send email');
+        }
+    } catch (error) {
+        console.error('[Withdrawal Notification] Error sending notification:', error);
+    }
+}
+
 // Add withdrawal processing endpoints after the existing payment endpoints
 
-// Withdrawal request endpoint
+// Withdrawal request endpoint (this is called from the frontend)
 app.post('/api/withdrawal-request', async (req, res) => {
     try {
         const {
@@ -3965,7 +4222,7 @@ app.post('/api/withdrawal-request', async (req, res) => {
             moneyAmount, // in GBP after fees
             platformFee,
             grossAmount,
-            bankDetails,
+            bankDetailsId,
             userEmail,
             userName
         } = req.body;
@@ -3979,7 +4236,7 @@ app.post('/api/withdrawal-request', async (req, res) => {
         });
 
         // Validate request
-        if (!userId || !amount || !moneyAmount || !bankDetails) {
+        if (!userId || !amount || !moneyAmount || !bankDetailsId) {
             return res.status(400).json({ 
                 success: false, 
                 error: 'Missing required withdrawal information' 
@@ -3994,7 +4251,27 @@ app.post('/api/withdrawal-request', async (req, res) => {
             });
         }
 
-        // Store withdrawal request in database (this would be Firestore in your case)
+        // Check if user has already withdrawn this month
+        const now = new Date();
+        const currentMonth = now.getMonth();
+        const currentYear = now.getFullYear();
+        
+        const existingWithdrawalsQuery = db.collection('withdrawalRequests')
+            .where('userId', '==', userId)
+            .where('withdrawalMonth', '==', currentMonth)
+            .where('withdrawalYear', '==', currentYear)
+            .where('status', 'in', ['pending', 'approved', 'completed']);
+        
+        const existingWithdrawals = await existingWithdrawalsQuery.get();
+        
+        if (!existingWithdrawals.empty) {
+            return res.status(400).json({
+                success: false,
+                error: 'You can only withdraw once per month'
+            });
+        }
+
+        // Create withdrawal request
         const withdrawalRequest = {
             userId,
             amount,
@@ -4002,25 +4279,35 @@ app.post('/api/withdrawal-request', async (req, res) => {
             platformFee,
             grossAmount,
             status: 'pending',
-            requestDate: new Date(),
-            bankDetails,
+            requestDate: admin.firestore.FieldValue.serverTimestamp(),
+            bankDetailsId,
             userEmail,
             userName,
+            withdrawalMonth: currentMonth,
+            withdrawalYear: currentYear,
             processedBy: null,
             processedDate: null,
             transactionId: null
         };
 
-        // In production, you'd save this to Firestore
-        console.log('[Withdrawal Request] Withdrawal request created:', withdrawalRequest);
+        const docRef = await db.collection('withdrawalRequests').add(withdrawalRequest);
+        
+        console.log('[Withdrawal Request] Withdrawal request created:', docRef.id);
 
-        // Send notification to admin (email/Slack/etc.)
-
+        // Send notification to admin
+        await sendWithdrawalNotification({
+            type: 'new_withdrawal_request',
+            amount: moneyAmount,
+            currency: 'GBP',
+            withdrawalId: docRef.id,
+            userEmail,
+            userName
+        });
 
         res.json({
             success: true,
             message: 'Withdrawal request submitted successfully',
-            requestId: `WR_${Date.now()}_${userId.substring(0, 8)}`
+            requestId: docRef.id
         });
 
     } catch (error) {
