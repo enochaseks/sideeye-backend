@@ -2586,6 +2586,7 @@ app.get('/api/deployment-test', (req, res) => {
 });
 
 // Real gift payment endpoint - processes actual payments
+// Updated: Force Railway deployment
 app.post('/api/process-gift-payment', async (req, res) => {
     try {
         const {
