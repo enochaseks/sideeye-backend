@@ -14,7 +14,17 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { FieldValue } = require('firebase-admin/firestore');
 
-// Initialize Stripe
+// Load .env file FIRST - ONLY if not in production
+if (process.env.NODE_ENV !== 'production') {
+  const dotenvResult = require('dotenv').config();
+  if (dotenvResult.error) {
+    console.warn('Warning: Error loading .env file:', dotenvResult.error.message); // Use warn, not error
+  } else {
+    console.log('.env file loaded successfully.');
+  }
+}
+
+// Initialize Stripe AFTER environment variables are loaded
 let stripe;
 try {
   if (process.env.STRIPE_SECRET_KEY) {
@@ -25,16 +35,6 @@ try {
   }
 } catch (error) {
   console.error('Error initializing Stripe:', error);
-}
-
-// Load .env file ONLY if not in production
-if (process.env.NODE_ENV !== 'production') {
-  const dotenvResult = require('dotenv').config();
-  if (dotenvResult.error) {
-    console.warn('Warning: Error loading .env file:', dotenvResult.error.message); // Use warn, not error
-  } else {
-    console.log('.env file loaded successfully.');
-  }
 }
 // For more direct debugging, uncomment these lines temporarily:
 // console.log('RAW STREAM_API_KEY from process.env after dotenv:', process.env.STREAM_API_KEY);
