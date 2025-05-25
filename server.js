@@ -394,26 +394,30 @@ app.get('/api/process-gift-payment', (req, res) => {
   });
 });
 
-// MOVED: Real gift payment endpoint - processes actual payments
+// MOVED: Real gift payment endpoint - processes actual payments with Stripe
 app.post('/api/process-gift-payment', async (req, res) => {
     try {
         const {
             giftId,
             giftName,
             amount, // Amount in GBP (e.g., 0.50 for 50p)
+            currency = 'GBP',
             senderId,
             senderName,
             receiverId,
             roomId,
             paymentMethod,
             paymentDetails,
-            customerEmail
+            customerEmail,
+            description,
+            metadata
         } = req.body;
 
         console.log('[Gift Payment] Processing real gift payment:', {
             giftId,
             giftName,
             amount,
+            currency,
             senderId,
             receiverId,
             roomId,
@@ -432,20 +436,121 @@ app.post('/api/process-gift-payment', async (req, res) => {
         if (amount < 0.50 || amount > 100) {
             return res.status(400).json({
                 success: false,
-                error: 'Invalid payment amount'
+                error: 'Invalid payment amount. Must be between £0.50 and £100.'
             });
         }
 
-        // Process payment - simplified approach
+        // Validate payment details for card payments
+        if (paymentMethod === 'card' && paymentDetails) {
+            const { cardNumber, expiryMonth, expiryYear, cvc, cardholderName } = paymentDetails;
+            
+            if (!cardNumber || !expiryMonth || !expiryYear || !cvc) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Missing required card details'
+                });
+            }
+            
+            // Basic card number validation
+            const cleanCardNumber = cardNumber.replace(/\s/g, '');
+            if (cleanCardNumber.length < 13 || cleanCardNumber.length > 19) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid card number'
+                });
+            }
+        }
+
+        let paymentResult;
         const paymentId = `gift_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        
-        // For now, just process the gift directly since browser handles payment
-        // In production, you'd validate the payment token here
-        const paymentResult = {
-            success: true,
-            paymentId: paymentId,
-            transactionId: paymentId
-        };
+
+        // Process payment with Stripe
+        if (stripe && paymentMethod === 'card') {
+            try {
+                console.log('[Gift Payment] Processing with Stripe...');
+                
+                // Create payment method
+                const paymentMethodObj = await stripe.paymentMethods.create({
+                    type: 'card',
+                    card: {
+                        number: paymentDetails.cardNumber.replace(/\s/g, ''),
+                        exp_month: parseInt(paymentDetails.expiryMonth),
+                        exp_year: parseInt(paymentDetails.expiryYear),
+                        cvc: paymentDetails.cvc,
+                    },
+                    billing_details: {
+                        name: paymentDetails.cardholderName || 'Anonymous',
+                        email: customerEmail
+                    }
+                });
+
+                // Create and confirm payment intent
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: Math.round(amount * 100), // Convert to pence
+                    currency: currency.toLowerCase(),
+                    payment_method: paymentMethodObj.id,
+                    confirmation_method: 'manual',
+                    confirm: true,
+                    description: description || `SideEye Gift: ${giftName}`,
+                    receipt_email: customerEmail,
+                    metadata: {
+                        ...metadata,
+                        giftId,
+                        senderId,
+                        receiverId,
+                        roomId,
+                        type: 'gift_payment',
+                        paymentId
+                    }
+                });
+
+                if (paymentIntent.status === 'succeeded') {
+                    paymentResult = {
+                        success: true,
+                        paymentId: paymentId,
+                        transactionId: paymentIntent.id,
+                        stripePaymentIntentId: paymentIntent.id
+                    };
+                    console.log('[Gift Payment] Stripe payment succeeded:', paymentIntent.id);
+                } else if (paymentIntent.status === 'requires_action') {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'Payment requires additional authentication. Please try a different card.',
+                        requiresAction: true,
+                        clientSecret: paymentIntent.client_secret
+                    });
+                } else {
+                    throw new Error(`Payment failed with status: ${paymentIntent.status}`);
+                }
+
+            } catch (stripeError) {
+                console.error('[Gift Payment] Stripe error:', stripeError);
+                
+                // Handle specific Stripe errors
+                let errorMessage = 'Payment processing failed';
+                if (stripeError.type === 'StripeCardError') {
+                    errorMessage = stripeError.message || 'Your card was declined';
+                } else if (stripeError.type === 'StripeInvalidRequestError') {
+                    errorMessage = 'Invalid payment information';
+                } else if (stripeError.type === 'StripeAPIError') {
+                    errorMessage = 'Payment service temporarily unavailable';
+                }
+                
+                return res.status(400).json({
+                    success: false,
+                    error: errorMessage
+                });
+            }
+        } else {
+            // Fallback for when Stripe is not configured (demo mode)
+            console.log('[Gift Payment] Stripe not configured, using demo mode');
+            paymentResult = {
+                success: true,
+                paymentId: paymentId,
+                transactionId: paymentId,
+                demo: true
+            };
+        }
 
         if (!paymentResult.success) {
             return res.status(400).json({
@@ -463,17 +568,21 @@ app.post('/api/process-gift-payment', async (req, res) => {
             receiverId,
             roomId,
             amount,
-            currency: 'GBP',
-            paymentId: paymentResult.paymentId || paymentId,
+            currency,
+            paymentId: paymentResult.paymentId,
             paymentMethod,
             transactionId: paymentResult.transactionId,
-            customerEmail: customerEmail
+            stripePaymentIntentId: paymentResult.stripePaymentIntentId,
+            customerEmail: customerEmail,
+            isDemo: paymentResult.demo || false
         });
 
         res.json({
             success: true,
             message: 'Payment processed and gift sent successfully!',
-            paymentId: paymentResult.paymentId || paymentId
+            paymentId: paymentResult.paymentId,
+            transactionId: paymentResult.transactionId,
+            demo: paymentResult.demo || false
         });
 
     } catch (error) {
@@ -3230,16 +3339,20 @@ async function processGiftPaymentSuccess(paymentData) {
             giftType: 'premium', // All paid gifts are premium
             giftName: getGiftNameById(paymentData.giftId),
             senderId: paymentData.senderId,
-            senderName: await getUserDisplayName(paymentData.senderId),
+            senderName: paymentData.senderName || await getUserDisplayName(paymentData.senderId),
             receiverId: paymentData.receiverId,
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
             value: paymentData.amount,
             cost: paymentData.amount,
-            currency: paymentData.currency,
+            currency: paymentData.currency || 'GBP',
             paymentId: paymentData.paymentId,
+            transactionId: paymentData.transactionId,
+            stripePaymentIntentId: paymentData.stripePaymentIntentId || null,
             status: 'completed',
             platformFee: platformFeeAmount,
-            hostEarning: hostEarningAmount
+            hostEarning: hostEarningAmount,
+            isDemo: paymentData.isDemo || false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
         // Calculate host earnings in SideCoins (80% of gift cost)
@@ -3250,46 +3363,64 @@ async function processGiftPaymentSuccess(paymentData) {
         await hostRef.update({
             sideCoins: admin.firestore.FieldValue.increment(hostEarningInSC),
             giftCount: admin.firestore.FieldValue.increment(1),
-            giftValue: admin.firestore.FieldValue.increment(paymentData.amount)
+            giftValue: admin.firestore.FieldValue.increment(paymentData.amount),
+            lastGiftReceived: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        // Record platform fee for accounting
-        await recordPlatformFee({
-            amount: platformFeeAmount,
-            currency: paymentData.currency,
-            giftId: paymentData.giftId,
-            paymentId: paymentData.paymentId,
-            senderId: paymentData.senderId,
-            receiverId: paymentData.receiverId,
-            roomId: paymentData.roomId,
-            timestamp: admin.firestore.FieldValue.serverTimestamp()
-        });
+        // Record platform fee for accounting (only for real payments)
+        if (!paymentData.isDemo) {
+            await recordPlatformFee({
+                amount: platformFeeAmount,
+                currency: paymentData.currency || 'GBP',
+                giftId: paymentData.giftId,
+                paymentId: paymentData.paymentId,
+                transactionId: paymentData.transactionId,
+                stripePaymentIntentId: paymentData.stripePaymentIntentId,
+                senderId: paymentData.senderId,
+                receiverId: paymentData.receiverId,
+                roomId: paymentData.roomId,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+            });
 
-        // Transfer platform fee to business account (try Stripe first, fallback to manual)
-        await processPlatformFeeTransfer({
-            amount: platformFeeAmount,
-            currency: paymentData.currency,
-            paymentId: paymentData.paymentId,
-            giftId: paymentData.giftId,
-            description: `Platform fee for gift ${paymentData.giftId} - ${paymentData.paymentId}`
-        });
+            // Transfer platform fee to business account (try Stripe first, fallback to manual)
+            await processPlatformFeeTransfer({
+                amount: platformFeeAmount,
+                currency: paymentData.currency || 'GBP',
+                paymentId: paymentData.paymentId,
+                transactionId: paymentData.transactionId,
+                giftId: paymentData.giftId,
+                description: `Platform fee for gift ${paymentData.giftId} - ${paymentData.paymentId}`
+            });
+        } else {
+            console.log('[Gift Payment Success] Demo mode - skipping platform fee processing');
+        }
 
-        // Send receipt email if email is available
-        if (paymentData.customerEmail) {
+        // Send receipt email if email is available (only for real payments)
+        if (paymentData.customerEmail && !paymentData.isDemo) {
             await sendGiftReceipt({
                 email: paymentData.customerEmail,
                 giftName: getGiftNameById(paymentData.giftId),
                 amount: paymentData.amount,
-                currency: paymentData.currency,
+                currency: paymentData.currency || 'GBP',
                 paymentId: paymentData.paymentId,
+                transactionId: paymentData.transactionId,
                 hostName: await getUserDisplayName(paymentData.receiverId),
-                roomId: paymentData.roomId
+                roomId: paymentData.roomId,
+                isDemo: false
             });
+        } else if (paymentData.isDemo) {
+            console.log('[Gift Payment Success] Demo mode - skipping email receipt');
         }
 
-        console.log('[Gift Payment Success] Processed successfully');
+        console.log('[Gift Payment Success] Processed successfully', {
+            paymentId: paymentData.paymentId,
+            hostEarningInSC: hostEarningInSC.toFixed(2),
+            platformFee: platformFeeAmount.toFixed(2),
+            isDemo: paymentData.isDemo || false
+        });
     } catch (error) {
         console.error('[Gift Payment Success] Error:', error);
+        throw error; // Re-throw to handle in calling function
     }
 }
 
