@@ -385,6 +385,15 @@ app.get('/api/payment-test', (req, res) => {
   });
 });
 
+// GET version of payment endpoint for testing
+app.get('/api/process-gift-payment', (req, res) => {
+  res.json({ 
+    message: 'Payment endpoint is accessible via GET!',
+    timestamp: new Date().toISOString(),
+    note: 'Use POST method for actual payments'
+  });
+});
+
 // Image upload endpoint
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   try {
